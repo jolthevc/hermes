@@ -1,0 +1,16 @@
+# Local stand-ins for production services. Postgres is Neon (see .env); this provides S3-compatible storage (R2 stand-in).
+name: hermes
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: hermes
+      MINIO_ROOT_PASSWORD: hermes-local-dev
+    ports:
+      - "9100:9000"
+      - "9101:9001"
+    volumes:
+      - minio-data:/data
+volumes:
+  minio-data:

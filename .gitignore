@@ -7,3 +7,5 @@ out/
 writing-test/gold/*.txt
 writing-test/gold/*.pdf
 render-test/out/
+dist/
+*.tsbuildinfo

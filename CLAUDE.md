@@ -5,6 +5,7 @@ Hermes is an autonomous studio that makes short animated comedy sketches (under 
 Read `docs/ARCHITECTURE.md` for the system design and `docs/SPRINT.md` for the current build plan.
 
 ## Non-negotiable rules
+
 - **Originality.** All characters, worlds and styles are our own. Never imitate a specific existing show's characters or look. Never clone a real person's voice.
 - **Gold references are for measurement only.** Transcribed reference sketches (`writing-test/gold/`) are used only to rate output. They never go into prompts, few-shot examples, fine-tuning data or anything published.
 - **Track the cost of every model call** (tokens and USD) in the cost ledger, tagged by show, sketch and stage. Cost per sketch must stay well under $1. Every runner enforces a spending cap.
@@ -14,12 +15,22 @@ Read `docs/ARCHITECTURE.md` for the system design and `docs/SPRINT.md` for the c
 - **Nothing publishes without passing the QA gates.** A show on autopilot can auto-publish only when every gate passes with high confidence. Otherwise sketches go to the human review queue.
 
 ## Repo map
-- `docs/`: architecture, sprint plan, decisions
-- `writing-test/`: writers'-room harness (Node 22, ESM). `node src/cli.mjs premises|script|cost`
-- `render-test/`: Blender 5.x headless Grease Pencil + EEVEE GPU test kit
-- (planned) `apps/`, `packages/`, `workers/`, `shows/`: see `docs/ARCHITECTURE.md` (Repo layout)
+
+- `packages/core/`: env (zod), Postgres schema + migrations (drizzle), durable job queue (`jobs.ts`, SKIP LOCKED + leases), cost ledger + budget caps, model registry, OpenRouter client with fallbacks, S3/R2 storage, SaladCloud client
+- `packages/agents/`: agent prompts + I/O schemas (writers' room today; the shot-script schema is the production contract)
+- `apps/brain/`: orchestrator: pipeline stages (`pipeline.ts`), stage handlers (`stages.ts`), worker loop, `hermes` CLI
+- `docs/`: architecture, sprint plan, GPU worker contract (`WORKERS.md`)
+- `writing-test/`, `render-test/`: early experiments (writing harness, Blender headless GPU test)
+
+## Commands
+
+- `pnpm install`; `pnpm check` (typecheck + lint + test); `pnpm format`
+- After schema changes: `pnpm db:generate`, then `pnpm db:migrate`
+- `pnpm hermes` with no args lists CLI commands. Typical: `ideate --show <id> --count 10 --auto-start 1`, `run --until-idle`, `status`, `sketch:show <id>`
+- Adding a pipeline stage: write a handler in `apps/brain/src/stages.ts`, register it in `HANDLERS`, then run `pnpm hermes resume` to pick up waiting sketches
 
 ## Conventions
+
 - **TypeScript (Node 22, ESM)** for the control plane and agents. **Python** for GPU workers (Blender `bpy`, TTS, video, image, ASR).
 - **Stages are idempotent and resumable.** Each takes inputs by artifact id and writes new artifacts. It never mutates an earlier stage's output.
 - **Structured data between agents** uses zod schemas and JSON-schema structured output, validated at every boundary.

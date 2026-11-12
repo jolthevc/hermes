@@ -1,0 +1,12 @@
+{
+  "name": "@hermes/brain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@hermes/agents": "workspace:*",
+    "@hermes/core": "workspace:*",
+    "drizzle-orm": "^0.44.0",
+    "zod": "^4.1.0"
+  }
+}

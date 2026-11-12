@@ -1,7 +1,9 @@
 # 7-day sprint: Hermes v1
 
 ## Goal by Day 7
+
 **One show, The Dragon's Accountant, runs unattended end to end.** It:
+
 - Writes and produces sketches automatically.
 - QA-gates them and puts them in a review feed.
 - Publishes approved sketches to YouTube Shorts.
@@ -11,11 +13,13 @@
 **A second show is spun up in a different style (3D toon or clay),** to prove new shows are cheap.
 
 **Out of scope for 7 days** (because of external dependencies, not effort):
+
 - Direct Instagram/TikTok APIs, which are waiting on Meta review and the TikTok audit. Use an aggregator, or post manually from the review feed.
 - Learning from real audience data. That needs weeks of posts, so the loop is built and fed but not yet meaningful.
 - Dozens of shows.
 
 ## Day 0 (today): admin, started now because these have waiting periods
+
 - [ ] **TikTok:** create a developer app and apply for the Content Posting API audit.
 - [ ] **Meta:** create a developer app, connect an Instagram Business account to a Facebook Page, and start business verification.
 - [ ] **YouTube:**
@@ -26,6 +30,7 @@
 - [ ] **Render test:** run `render-test` on a GPU and send back `summary.txt` and `report.json`.
 
 ## Day 1: foundation
+
 - Monorepo scaffold (`apps/`, `packages/`, `workers/`), CI with lint, typecheck and tests.
 - `packages/core`:
   - Postgres schema and migrations (tables in ARCHITECTURE §7)
@@ -38,6 +43,7 @@
 - **Done when:** `hermes sketch new --show dragons-accountant` produces a stored shot script with the cost recorded in Postgres.
 
 ## Day 2: show kit (art + voices) for The Dragon's Accountant
+
 - **Image worker** (Qwen-Image-Edit-2511):
   - Style boards (you pick one)
   - Character sheets: Grimsby, Dunmore, and Ember's parts (eye, claw, tail, wing, flank)
@@ -48,6 +54,7 @@
 - **Done when:** an approved kit manifest exists, and a 10-second screen test renders, walk/talk/react.
 
 ## Day 3: first sketch rendered end to end
+
 - **Director agent:** shot script → timeline (camera, blocking, holds).
 - **Voice worker:** takes per line, then picks the best by timing and ASR match.
 - **Render worker:** Blender scene assembly from the timeline + Rhubarb lip sync + render at 1080×1920.
@@ -56,6 +63,7 @@
 - **Done when:** a finished MP4 of Schedule G exists, with a measured cost per stage.
 
 ## Day 4: QA gates and inserts
+
 - **Technical QA:**
   - Duration
   - Loudness (LUFS)
@@ -70,6 +78,7 @@
 - **Done when:** 5 sketches go through Gates 1–3 unattended, with a QA report each.
 
 ## Day 5: Brain, Medic and dashboard
+
 - **Brain:** daily slate planner, budget guards, health watch, daily report.
 - **Medic:** error classification, remedy playbook, escalation to GitHub issues.
 - **Dashboard (Next.js):**
@@ -80,12 +89,14 @@
 - **Done when:** you can run a batch of 10 from the dashboard and review it on your phone.
 
 ## Day 6: publishing, analytics, second show
+
 - **Publisher:** YouTube Shorts direct; aggregator for Instagram/TikTok. Captions, hashtags, AI labels, scheduled slots.
 - **Analyst:** metrics ingestion at 1h/24h/72h/7d, features table, bandit arms, post-mortem writer, show memory.
 - **Second show:** run the full show-creation pipeline (Showrunner → Art Director → Kit Builder → Casting) for a show in 3D toon or clay style. Time it and cost it.
 - **Done when:** the first approved sketch is posted on YouTube Shorts, and show #2 has an approved kit.
 
 ## Day 7: hardening and go-live
+
 - **Unattended batch:** 24 hours on autopilot to the review queue (about 20 sketches across 2 shows).
 - **Fix the top failure classes**, and add the remedies to the playbook.
 - **Ops:** canary on deploy and nightly; circuit breakers; global kill switch.
@@ -96,6 +107,7 @@
   - No unhandled failures in 24 hours.
 
 ## How we build it in 7 days
+
 - **Parallel Claude Code sessions per workstream,** each in its own git worktree and branch:
   - (A) core + orchestration
   - (B) agents
