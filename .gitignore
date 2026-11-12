@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+node_modules/
+out/
+*.log
+writing-test/gold/*.txt
+writing-test/gold/*.pdf
+render-test/out/

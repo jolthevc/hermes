@@ -1,0 +1,15 @@
+{
+  "_note": "Show-specific actions added on top of vocab/core.json. Grows over time from kit_requests the writers keep needing.",
+  "actions": [
+    { "token": "ember_eye_fills_frame", "description": "Ember's single huge eye slides into frame, fills it, pupil narrows or widens" },
+    { "token": "ember_nostril_smoke", "description": "Smoke curls from Ember's nostril (annoyance gauge)" },
+    { "token": "ember_tail_sweep", "description": "Ember's tail sweeps through the background, coins scatter" },
+    { "token": "ember_claw_tap", "description": "A giant claw taps impatiently on the gold beside Grimsby's desk" },
+    { "token": "grimsby_sip_tea", "description": "Grimsby sips tea, unhurried" },
+    { "token": "grimsby_adjust_spectacles", "description": "Grimsby pushes spectacles up his nose" },
+    { "token": "grimsby_stamp_document", "description": "Grimsby stamps a document once, firmly" },
+    { "token": "grimsby_abacus", "description": "Grimsby clicks beads on an abacus" },
+    { "token": "dunmore_draw_sword", "description": "Dunmore half-draws his sword out of habit, then sheathes it" },
+    { "token": "dunmore_salute", "description": "Dunmore salutes too vigorously" }
+  ]
+}

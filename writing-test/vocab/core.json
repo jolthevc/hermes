@@ -1,0 +1,11 @@
+{
+  "_note": "Shared core vocabulary every show's art kit must implement. Kits ADD tokens in shows/<id>/kit.json; they never remove these. Anything a writer describes that maps to neither core nor kit is realized as a video-model insert shot (realization = 'insert') and logged as a candidate kit addition.",
+  "framings": ["WIDE", "MED", "CU", "ECU", "TWO_SHOT", "OTS", "INSERT_PROP", "POV"],
+  "camera": ["cut", "hold", "slow_push_in", "snap_zoom", "shake", "pan_to"],
+  "expressions": ["neutral", "deadpan", "annoyed", "confused", "alarmed", "smug", "sad", "delighted", "dead_inside", "suspicious", "embarrassed"],
+  "actions": [
+    "idle", "talk", "enter_left", "enter_right", "exit_left", "exit_right", "walk_to", "turn_to", "look_at",
+    "look_to_camera", "point", "shrug", "facepalm", "nod", "shake_head", "sit", "stand", "lean_in", "slump",
+    "double_take", "freeze", "hand_over_prop", "pick_up_prop", "drop_prop", "read_document", "write", "sigh", "blink"
+  ]
+}
