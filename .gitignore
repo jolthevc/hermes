@@ -10,3 +10,4 @@ render-test/out/
 dist/
 *.tsbuildinfo
 apps/brain/src/_*.ts
+review/
