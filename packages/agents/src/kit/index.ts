@@ -1,0 +1,89 @@
+import { type CostContext, generateStructured } from "@hermes/core";
+import { z } from "zod";
+
+// ---------- Art Director ----------
+export const StyleDirection = z.object({
+  name: z.string().describe("Short name, e.g. 'Parchment cutout'"),
+  summary: z.string().describe("One sentence a human can judge"),
+  style_prompt: z
+    .string()
+    .describe(
+      "Style suffix appended to EVERY image prompt for this show: medium, linework, shading, palette, texture. Concrete, no artist or franchise names.",
+    ),
+  renderer: z.enum(["2d_cutout", "3d_toon", "clay"]).describe("Which production style this implies"),
+});
+
+export const CharacterDesign = z.object({
+  name: z.string(),
+  design_prompt: z
+    .string()
+    .describe(
+      "Physical design: silhouette, proportions, colors, clothing, signature props. Style-free (no medium words).",
+    ),
+  framing_rule: z.string().describe("e.g. 'never fully in frame; show eye/claw/tail parts' or 'full body'"),
+});
+
+export const StyleBrief = z.object({
+  directions: z.array(StyleDirection).describe("Exactly 3 clearly different looks"),
+  characters: z.array(CharacterDesign),
+  key_art_prompt: z
+    .string()
+    .describe(
+      "One vertical key-art scene showing the main cast in the main location, mid-scene, no text. Style-free; the style suffix is added per direction.",
+    ),
+  background_prompts: z
+    .array(z.object({ name: z.string(), prompt: z.string() }))
+    .describe("Main locations, empty of characters"),
+});
+export type StyleBrief = z.infer<typeof StyleBrief>;
+
+const ART_SYSTEM = `You are the Art Director of an animated comedy show for vertical video (9:16, phone screens).
+You turn a show bible into concrete, production-ready visual direction for image models.
+Rules:
+- The look must be ORIGINAL. Never reference existing shows, studios, franchises or named artists.
+- Designs must read instantly at phone size: bold silhouettes, few colors, clear faces, big readable expressions.
+- Designs must be animatable as simple puppets: limited detail, separable parts (head, torso, arms, mouth), flat or simple shading.
+- Prompts are literal visual descriptions for an image model. No story, no jokes, no text in images.`;
+
+export async function styleBrief(bible: string, ctx: CostContext) {
+  const r = await generateStructured({
+    role: "showrunner",
+    system: ART_SYSTEM,
+    prompt: `SHOW BIBLE:\n${bible}\n\nProduce the style brief: 3 clearly different directions that all fit the bible's tone (one may follow the bible's own "Look" notes closely, the others should be genuine alternatives), the character designs, key art prompt and background prompts.`,
+    schema: StyleBrief,
+    schemaName: "style_brief",
+    ctx: { ...ctx, stage: "kit:style_brief" },
+  });
+  return r.output;
+}
+
+// ---------- Casting ----------
+export const VoiceBrief = z.object({
+  voices: z.array(
+    z.object({
+      character: z.string(),
+      instruct: z
+        .string()
+        .describe(
+          "Voice description for a voice-design TTS model: age, gender, timbre, pitch, pace, accent, energy, texture. Describe an ORIGINAL voice; never name or imitate a real person or existing character.",
+        ),
+      audition_line: z
+        .string()
+        .describe("A 6-14 second in-character line that shows the voice and the deadpan delivery"),
+    }),
+  ),
+});
+export type VoiceBrief = z.infer<typeof VoiceBrief>;
+
+export async function voiceBrief(bible: string, ctx: CostContext) {
+  const r = await generateStructured({
+    role: "showrunner",
+    system:
+      "You are the casting director of an animated deadpan comedy. You design original character voices for a voice-design TTS model. Comedy voices must be distinct from each other within the cast and serve the character's comic function (the straight man sounds unbothered; the blowhard sounds grand).",
+    prompt: `SHOW BIBLE:\n${bible}\n\nWrite one voice brief per main character.`,
+    schema: VoiceBrief,
+    schemaName: "voice_brief",
+    ctx: { ...ctx, stage: "cast:voice_brief" },
+  });
+  return r.output;
+}

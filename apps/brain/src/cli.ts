@@ -2,14 +2,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { renderText, ShotScript } from "@hermes/agents";
-import { closeDb, db, queue, schema, spentToday } from "@hermes/core";
+import { closeDb, db, queue, salad, schema, spentToday, storage } from "@hermes/core";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { runGpuDispatcher } from "./gpu.js";
+import { approveDraft, getOrCreateDraft, pickStyle, pickVoice } from "./kit.js";
 import { enqueueStage, startSketch } from "./orchestrator.js";
 import { SKETCH_STAGES, type SketchStage } from "./pipeline.js";
 import { HANDLERS } from "./stages.js";
 import { runLoop } from "./worker.js";
 
-const { shows, showVersions, premises, sketches, shotScripts, jobs, costLedger, ideationBatches } = schema;
+const { shows, showVersions, premises, sketches, shotScripts, jobs, costLedger, ideationBatches, artifacts } = schema;
 
 const HELP = `hermes <command> [options]
 
@@ -18,13 +20,22 @@ Shows
   show:list
   show:set <id> [--mode autopilot|manual|paused] [--daily-target N] [--budget USD] [--publish on|off]
 
+Show setup (art + voices)
+  kit:start --show <id>                           Art Director brief + 3 style boards, Casting brief + voice auditions
+  kit:assets --show <id> [--kind style_board]     list generated assets with view links
+  kit:pick-style --show <id> --board <artifactId> pick a style board -> character sheets + backgrounds
+  cast:pick --show <id> --take <artifactId>       pick a voice audition for its character
+  show:approve <id>                               approve the draft version (sketches then use it)
+
 Writing
   ideate --show <id> [--count 10] [--auto-start N] [--batch-tag T]   queue an ideation job
   premises --show <id>                            list the latest batch of premises
   sketch:start --premise <id> [--batch-tag T]     start a sketch from a premise
 
 Running
-  run [--until-idle] [--concurrency 3]            process jobs
+  run [--until-idle] [--concurrency 3]            process CPU jobs (agents)
+  gpu [--until-idle]                              dispatch GPU jobs (GPU_BACKEND=salad|local)
+  infra:salad --image-repo <registry/user> [--tag T]   create Salad queues + scale-to-zero worker groups
   resume                                          re-enqueue sketches waiting at a stage that now has a handler
   jobs:retry <jobId>                              requeue a dead job
 
@@ -52,6 +63,11 @@ const { values: o, positionals } = parseArgs({
     premise: { type: "string" },
     "until-idle": { type: "boolean" },
     concurrency: { type: "string" },
+    kind: { type: "string" },
+    board: { type: "string" },
+    take: { type: "string" },
+    "image-repo": { type: "string" },
+    tag: { type: "string" },
   },
 });
 
@@ -134,6 +150,101 @@ async function main() {
     case "sketch:start": {
       const s = await startSketch(o.premise!, { batchTag: o["batch-tag"] });
       console.log(`sketch ${s.id} started at stage draft — run: pnpm hermes run --until-idle`);
+      break;
+    }
+    case "kit:start": {
+      const showId = o.show!;
+      const draft = await getOrCreateDraft(showId);
+      await queue.enqueue("kit:style_brief", { showId }, { showId, idempotencyKey: `${draft.id}:style_brief` });
+      await queue.enqueue("cast:voice_brief", { showId }, { showId, idempotencyKey: `${draft.id}:voice_brief` });
+      console.log(
+        `draft v${draft.version}: queued Art Director + Casting. Run: pnpm hermes run --until-idle, then pnpm hermes gpu --until-idle`,
+      );
+      break;
+    }
+    case "kit:assets": {
+      const rows = await db
+        .select()
+        .from(artifacts)
+        .where(and(eq(artifacts.showId, o.show!), o.kind ? eq(artifacts.kind, o.kind) : undefined))
+        .orderBy(asc(artifacts.kind), asc(artifacts.createdAt));
+      for (const a of rows) {
+        const m = a.meta as Record<string, unknown>;
+        const label = [
+          m.directionName,
+          m.character,
+          m.background,
+          m.sheet,
+          m.take ? `take ${m.take}` : null,
+          m.seed ? `seed ${m.seed}` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        console.log(`\n${a.kind}  ${a.id}\n  ${label}\n  ${await storage.presignGet(a.storageKey, 24 * 3600)}`);
+      }
+      if (!rows.length) console.log("no assets yet");
+      break;
+    }
+    case "kit:pick-style": {
+      const [a] = await db.select().from(artifacts).where(eq(artifacts.id, o.board!));
+      if (a?.kind !== "style_board") throw new Error("--board must be a style_board artifact id");
+      await pickStyle(o.show!, Number((a.meta as { direction: number }).direction), a.id, a.storageKey);
+      console.log("style picked; character sheets + backgrounds queued. Run: pnpm hermes gpu --until-idle");
+      break;
+    }
+    case "cast:pick": {
+      const [a] = await db.select().from(artifacts).where(eq(artifacts.id, o.take!));
+      if (a?.kind !== "voice_audition") throw new Error("--take must be a voice_audition artifact id");
+      const character = (a.meta as { character: string }).character;
+      await pickVoice(o.show!, character, a.id, a.storageKey);
+      console.log(`${character}: voice picked`);
+      break;
+    }
+    case "show:approve": {
+      const v = await approveDraft(positionals[0]!, "cli");
+      console.log(`approved v${v}; new sketches use it`);
+      break;
+    }
+    case "infra:salad": {
+      // Idempotent: creates missing Salad queues + scale-to-zero container groups for each GPU worker.
+      const repo = o["image-repo"];
+      const tag = o.tag ?? "latest";
+      if (!repo) throw new Error("--image-repo is required, e.g. docker.io/<user> or ghcr.io/<user>");
+      const gpus = await salad.gpuClassIds([
+        "RTX 5090 (",
+        "RTX 4090",
+        "RTX 3090",
+        "RTX A5000",
+        "RTX 4080 (",
+        "RTX 4070 Ti Super",
+        "RTX 4060 Ti (16",
+        "RTX 5060 Ti (16",
+      ]);
+      const queues = new Set((await salad.listQueues()).items.map((q) => q.name));
+      const groups = new Set((await salad.listContainerGroups()).items.map((g) => g.name));
+      for (const pool of ["image", "tts"] as const) {
+        if (!queues.has(pool)) await salad.createQueue(pool, `Hermes ${pool} worker jobs`);
+        const name = `hermes-${pool}`;
+        if (!groups.has(name))
+          await salad.createWorkerGroup({
+            name,
+            image: `${repo}/hermes-${pool}:${tag}`,
+            queue: pool,
+            gpuClassIds: gpus,
+            cpu: 8,
+            memoryMb: 30720,
+            storageGb: 60,
+            maxReplicas: 2,
+          });
+        console.log(
+          `${pool}: queue ${queues.has(pool) ? "exists" : "created"}, group ${groups.has(name) ? "exists" : "created"}`,
+        );
+      }
+      console.log(`${gpus.length} GPU classes allowed. Groups start at 0 replicas and scale with queue depth.`);
+      break;
+    }
+    case "gpu": {
+      await runGpuDispatcher({ untilIdle: o["until-idle"] });
       break;
     }
     case "run": {

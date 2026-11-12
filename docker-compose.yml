@@ -1,16 +1,29 @@
-# Local stand-ins for production services. Postgres is Neon (see .env); this provides S3-compatible storage (R2 stand-in).
+# Local stand-ins for production services. Postgres is Neon (see .env).
+#   storage:    S3-compatible store (Cloudflare R2 stand-in), http://localhost:9100
+#   mock-image / mock-tts: GPU workers in HERMES_MOCK mode (no GPU) for testing the dispatch contract
+#     (GPU_BACKEND=local, S3_ENDPOINT=http://host.docker.internal:9100 so containers can reach presigned URLs)
 name: hermes
 services:
-  minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: hermes
-      MINIO_ROOT_PASSWORD: hermes-local-dev
+  storage:
+    image: chrislusf/seaweedfs:3.97
+    command: server -dir=/data -s3 -s3.port=8333 -master.volumeSizeLimitMB=1024
     ports:
-      - "9100:9000"
-      - "9101:9001"
+      - "9100:8333"
     volumes:
-      - minio-data:/data
+      - storage-data:/data
+  mock-image:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+      args: { WORKER: image, BASE: "python:3.11-slim", MOCK: "1" }
+    ports: ["8101:8000"]
+    profiles: [mock]
+  mock-tts:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile
+      args: { WORKER: tts, BASE: "python:3.11-slim", MOCK: "1" }
+    ports: ["8102:8000"]
+    profiles: [mock]
 volumes:
-  minio-data:
+  storage-data:

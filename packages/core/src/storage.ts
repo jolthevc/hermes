@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  CreateBucketCommand,
+  GetObjectCommand,
+  HeadBucketCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { db } from "./db/client.js";
 import { artifacts } from "./db/schema.js";
@@ -58,6 +64,21 @@ export function presignPut(key: string, contentType: string, seconds = 3600) {
     expiresIn: seconds,
   });
 }
+
+export async function ensureBucket() {
+  try {
+    await s3().send(new HeadBucketCommand({ Bucket: env.S3_BUCKET }));
+  } catch {
+    await s3().send(new CreateBucketCommand({ Bucket: env.S3_BUCKET }));
+  }
+}
+
+export async function getBytes(key: string): Promise<Buffer> {
+  const r = await s3().send(new GetObjectCommand({ Bucket: env.S3_BUCKET, Key: key }));
+  return Buffer.from(await r.Body!.transformToByteArray());
+}
+
+export const showKey = (showId: string, name: string) => `shows/${showId}/kit/${name}`;
 
 export const artifactKey = (showId: string, sketchId: string, name: string) =>
   `shows/${showId}/sketches/${sketchId}/${name}`;

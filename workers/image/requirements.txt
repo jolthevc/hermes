@@ -1,0 +1,10 @@
+# Flux2KleinPipeline needs a recent diffusers (installed from source per the model card).
+git+https://github.com/huggingface/diffusers.git
+transformers>=4.57
+accelerate>=1.2
+safetensors
+pillow
+torchvision
+timm
+einops
+kornia

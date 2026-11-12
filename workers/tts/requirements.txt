@@ -1,0 +1,4 @@
+qwen-tts
+soundfile
+numpy
+faster-whisper>=1.1
