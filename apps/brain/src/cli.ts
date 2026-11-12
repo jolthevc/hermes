@@ -243,10 +243,7 @@ async function main() {
             storageGb: 60,
             maxReplicas: 2,
           });
-        else {
-          await salad.setImage(name, image);
-          await salad.setGpuClasses(name, gpus);
-        }
+        else await salad.updateWorkerGroup(name, image, gpus);
         console.log(
           `${pool}: ${groups.has(name) ? "updated" : "created"} ${name} -> ${image}, ${gpus.length} GPU classes`,
         );

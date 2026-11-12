@@ -26,6 +26,18 @@ function projectPath() {
 }
 
 async function salad<T>(method: string, url: string, body?: unknown): Promise<T> {
+  // Salad allows one pending update per container group; wait it out (up to ~3 min) instead of failing.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await saladOnce<T>(method, url, body);
+    } catch (e) {
+      if (attempt >= 18 || !/pending_update_in_progress/.test((e as Error).message)) throw e;
+      await new Promise((r) => setTimeout(r, 10_000));
+    }
+  }
+}
+
+async function saladOnce<T>(method: string, url: string, body?: unknown): Promise<T> {
   let res: Response;
   try {
     res = await fetch(url, {
@@ -157,9 +169,10 @@ export function setImage(name: string, image: string) {
   return salad<Record<string, unknown>>("PATCH", `${projectPath()}/containers/${name}`, { container: { image } });
 }
 
-export function setGpuClasses(name: string, gpuClassIds: string[]) {
+/** One PATCH for image + GPU classes (Salad rejects a second update while one is pending). */
+export function updateWorkerGroup(name: string, image: string, gpuClassIds: string[]) {
   return salad<Record<string, unknown>>("PATCH", `${projectPath()}/containers/${name}`, {
-    container: { resources: { gpu_classes: gpuClassIds } },
+    container: { image, resources: { gpu_classes: gpuClassIds } },
   });
 }
 
