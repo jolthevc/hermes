@@ -66,9 +66,14 @@ def generate(ctx: Ctx) -> dict[str, Any]:
     import torch
     from PIL import Image
 
+    import time
+
     refs = [Image.open(io.BytesIO(ctx.input_bytes(n))).convert("RGB") for n in p.get("refs", [])]
     pipe = _get_pipe()
+    diag = _diagnostics(pipe)
+    per_image: list[float] = []
     for i, seed in enumerate(seeds):
+        t0 = time.time()
         out = pipe(
             prompt=p["prompt"],
             image=refs or None,
@@ -78,8 +83,31 @@ def generate(ctx: Ctx) -> dict[str, Any]:
             guidance_scale=float(p.get("guidance", 1.0)),
             generator=torch.Generator(device="cuda").manual_seed(int(seed)),
         ).images[0]
-        ctx.write(f"image_{i}", _png(out), {"seed": seed, "model": IMAGE_MODEL})
-    return {"images": len(seeds)}
+        torch.cuda.synchronize()
+        per_image.append(round(time.time() - t0, 2))
+        ctx.write(f"image_{i}", _png(out), {"seed": seed, "model": IMAGE_MODEL, "seconds": per_image[-1]})
+    return {
+        "images": len(seeds),
+        "per_image_s": per_image,
+        "max_vram_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2),
+        **diag,
+    }
+
+
+def _diagnostics(pipe) -> dict[str, Any]:
+    import torch
+
+    props = torch.cuda.get_device_properties(0)
+    devices = {n: str(getattr(pipe, n).device) for n in ("transformer", "text_encoder", "vae") if hasattr(pipe, n)}
+    return {
+        "gpu": props.name,
+        "vram_total_gb": round(props.total_memory / 1e9, 1),
+        "devices": devices,
+        "dtype": str(pipe.transformer.dtype),
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "attn": str(getattr(pipe.transformer, "attn_processors", {}) and next(iter(pipe.transformer.attn_processors.values())).__class__.__name__),
+    }
 
 
 def cutout(ctx: Ctx) -> dict[str, Any]:

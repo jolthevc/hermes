@@ -9,3 +9,4 @@ writing-test/gold/*.pdf
 render-test/out/
 dist/
 *.tsbuildinfo
+apps/brain/src/_*.ts

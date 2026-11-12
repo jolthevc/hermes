@@ -1,6 +1,6 @@
 import { hostname } from "node:os";
 import { db, env, HermesError, type Job, log, queue, recordCost, salad, schema, storage } from "@hermes/core";
-import { and, eq, isNotNull, like } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, like } from "drizzle-orm";
 import { onDead, onSucceeded } from "./orchestrator.js";
 
 const { jobs, artifacts } = schema;
@@ -175,6 +175,41 @@ async function pollSalad(): Promise<number> {
   return inflight.length;
 }
 
+// ---------- scaling (Brain-owned, provider-agnostic) ----------
+// Replicas follow in-flight jobs per pool; a pool idle for IDLE_MS scales to zero.
+const MAX_REPLICAS: Record<string, number> = { image: 2, tts: 2, render: 4, video: 2 };
+const IDLE_MS = 10 * 60_000;
+const lastBusy: Record<string, number> = {};
+const current: Record<string, number> = {};
+
+async function scalePools(pools: string[]) {
+  const rows = await db
+    .select({ queue: jobs.queue, status: jobs.status })
+    .from(jobs)
+    .where(and(like(jobs.queue, "gpu:%"), inArray(jobs.status, ["queued", "running"])));
+  for (const pool of pools) {
+    const n = rows.filter((r) => r.queue === `gpu:${pool}`).length;
+    const group = `hermes-${pool}`;
+    if (n > 0) lastBusy[pool] = Date.now();
+    const want =
+      n > 0
+        ? Math.min(MAX_REPLICAS[pool] ?? 1, Math.max(1, Math.ceil(n / 3)))
+        : Date.now() - (lastBusy[pool] ?? 0) > IDLE_MS
+          ? 0
+          : (current[pool] ?? 0);
+    if (current[pool] === want) continue;
+    try {
+      await salad.setReplicas(group, want);
+      current[pool] = want;
+      log.info({ pool, replicas: want, inflight: n }, "scaled gpu pool");
+    } catch (e) {
+      // Groups that don't exist yet (e.g. render before Day 3) are skipped quietly.
+      if (!/404/.test((e as Error).message)) log.warn({ pool, err: (e as Error).message }, "scale failed");
+      current[pool] = want;
+    }
+  }
+}
+
 export async function runGpuDispatcher(opts: { untilIdle?: boolean; pools?: string[] } = {}) {
   const pools = opts.pools ?? ["image", "tts", "render", "video"];
   await storage.ensureBucket();
@@ -184,7 +219,11 @@ export async function runGpuDispatcher(opts: { untilIdle?: boolean; pools?: stri
     let worked = false;
     while (await dispatchOne(pools)) worked = true;
     const inflight = backend() === "salad" ? await pollSalad() : 0;
-    if (opts.untilIdle && !worked && inflight === 0) return;
+    if (backend() === "salad") await scalePools(pools).catch((e) => log.warn({ err: (e as Error).message }, "scaling"));
+    if (opts.untilIdle && !worked && inflight === 0) {
+      if (backend() === "salad") for (const p of pools) await salad.setReplicas(`hermes-${p}`, 0).catch(() => {});
+      return;
+    }
     await new Promise((r) => setTimeout(r, worked ? 500 : 5_000));
   }
 }

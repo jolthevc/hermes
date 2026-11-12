@@ -30,7 +30,11 @@ async function salad<T>(method: string, url: string, body?: unknown): Promise<T>
   try {
     res = await fetch(url, {
       method,
-      headers: { "Salad-Api-Key": requireEnv("SALAD_API_KEY"), "Content-Type": "application/json" },
+      headers: {
+        "Salad-Api-Key": requireEnv("SALAD_API_KEY"),
+        // Salad's PATCH endpoints require JSON merge-patch.
+        "Content-Type": method === "PATCH" ? "application/merge-patch+json" : "application/json",
+      },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(30_000),
     });
@@ -147,6 +151,10 @@ export function createWorkerGroup(s: WorkerGroupSpec) {
 // Container groups (scaling is the Brain's job: replicas follow queue depth, 0 when idle).
 export function getContainerGroup(name: string) {
   return salad<Record<string, unknown>>("GET", `${projectPath()}/containers/${name}`);
+}
+
+export function setImage(name: string, image: string) {
+  return salad<Record<string, unknown>>("PATCH", `${projectPath()}/containers/${name}`, { container: { image } });
 }
 
 export function setReplicas(name: string, replicas: number) {
