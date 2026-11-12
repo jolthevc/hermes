@@ -210,25 +210,32 @@ async function main() {
       const repo = o["image-repo"];
       const tag = o.tag ?? "latest";
       if (!repo) throw new Error("--image-repo is required, e.g. docker.io/<user> or ghcr.io/<user>");
-      const gpus = await salad.gpuClassIds([
-        "RTX 5090 (",
-        "RTX 4090",
-        "RTX 3090",
-        "RTX A5000",
-        "RTX 4080 (",
-        "RTX 4070 Ti Super",
-        "RTX 4060 Ti (16",
-        "RTX 5060 Ti (16",
-      ]);
+      // GPU floors per pool, measured: FLUX.2 klein peaks at ~19 GB VRAM, and on Salad an over-full card
+      // spills to system RAM (~100x slower) instead of failing, so the image pool needs 24 GB+ cards.
+      const POOL_GPUS: Record<string, string[]> = {
+        image: ["RTX 5090 (", "RTX 4090", "RTX 3090", "RTX A5000"],
+        tts: [
+          "RTX 5090 (",
+          "RTX 4090",
+          "RTX 3090",
+          "RTX A5000",
+          "RTX 4080 (",
+          "RTX 4070 Ti Super",
+          "RTX 4060 Ti (16",
+          "RTX 5060 Ti (16",
+        ],
+      };
       const queues = new Set((await salad.listQueues()).items.map((q) => q.name));
       const groups = new Set((await salad.listContainerGroups()).items.map((g) => g.name));
       for (const pool of ["image", "tts"] as const) {
+        const gpus = await salad.gpuClassIds(POOL_GPUS[pool]!);
+        const image = `${repo}/hermes-${pool}:${tag}`;
         if (!queues.has(pool)) await salad.createQueue(pool, `Hermes ${pool} worker jobs`);
         const name = `hermes-${pool}`;
         if (!groups.has(name))
           await salad.createWorkerGroup({
             name,
-            image: `${repo}/hermes-${pool}:${tag}`,
+            image,
             queue: pool,
             gpuClassIds: gpus,
             cpu: 8,
@@ -236,11 +243,14 @@ async function main() {
             storageGb: 60,
             maxReplicas: 2,
           });
+        else {
+          await salad.setImage(name, image);
+          await salad.setGpuClasses(name, gpus);
+        }
         console.log(
-          `${pool}: queue ${queues.has(pool) ? "exists" : "created"}, group ${groups.has(name) ? "exists" : "created"}`,
+          `${pool}: ${groups.has(name) ? "updated" : "created"} ${name} -> ${image}, ${gpus.length} GPU classes`,
         );
       }
-      console.log(`${gpus.length} GPU classes allowed. Groups start at 0 replicas and scale with queue depth.`);
       break;
     }
     case "gpu": {

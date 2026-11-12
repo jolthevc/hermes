@@ -33,7 +33,13 @@ def _get_pipe():
         import torch
         from diffusers import Flux2KleinPipeline
 
-        _pipe = Flux2KleinPipeline.from_pretrained(IMAGE_MODEL, torch_dtype=torch.bfloat16).to("cuda")
+        _pipe = Flux2KleinPipeline.from_pretrained(IMAGE_MODEL, torch_dtype=torch.bfloat16)
+        # Peak use is ~19 GB. On Salad (Windows/WSL2 hosts) an over-full card silently spills to system RAM
+        # and runs ~100x slower instead of failing, so on <20 GB cards move components on demand instead.
+        if torch.cuda.get_device_properties(0).total_memory < 20e9:
+            _pipe.enable_model_cpu_offload()
+        else:
+            _pipe.to("cuda")
     return _pipe
 
 

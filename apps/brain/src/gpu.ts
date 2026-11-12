@@ -204,8 +204,8 @@ async function scalePools(pools: string[]) {
       log.info({ pool, replicas: want, inflight: n }, "scaled gpu pool");
     } catch (e) {
       // Groups that don't exist yet (e.g. render before Day 3) are skipped quietly.
-      if (!/404/.test((e as Error).message)) log.warn({ pool, err: (e as Error).message }, "scale failed");
-      current[pool] = want;
+      if (/404/.test((e as Error).message)) current[pool] = want;
+      else log.warn({ pool, err: (e as Error).message }, "scale failed; will retry"); // e.g. pending_update_in_progress
     }
   }
 }

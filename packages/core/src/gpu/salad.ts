@@ -157,6 +157,12 @@ export function setImage(name: string, image: string) {
   return salad<Record<string, unknown>>("PATCH", `${projectPath()}/containers/${name}`, { container: { image } });
 }
 
+export function setGpuClasses(name: string, gpuClassIds: string[]) {
+  return salad<Record<string, unknown>>("PATCH", `${projectPath()}/containers/${name}`, {
+    container: { resources: { gpu_classes: gpuClassIds } },
+  });
+}
+
 export function setReplicas(name: string, replicas: number) {
   return salad<Record<string, unknown>>("PATCH", `${projectPath()}/containers/${name}`, { replicas });
 }
