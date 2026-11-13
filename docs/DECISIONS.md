@@ -2,6 +2,32 @@
 
 Short records of choices that shape the build. Newest first.
 
+## 2026-11-13: Switch from puppet parts to frames-first generation (supersedes "2D clay cutouts")
+
+**Decision.** Stop building cutout puppets. Each sketch is generated shot by shot:
+
+1. A keyframe still per shot (FLUX.2 klein, with the character's model sheet and the background as references), checked by the vision judge.
+2. Each keyframe animated by shot type:
+   - talking: an audio-driven talking-video model (candidates: InfiniteTalk, LongCat-Video-Avatar; licenses to verify)
+   - reactions and holds: near-still clip or the held frame
+   - physical gags: first/last-frame image-to-video (Wan 2.x or LTX-2)
+3. Assembled with timing from TTS audio plus the shot script's holds, then video QA with rerolls.
+
+**Why.** The automated puppet build stalled on edit-model limits, measured on the real kit:
+
+- mouth edits deleted moustaches (Dunmore 0/20 face overlays)
+- pose edits added hands or dropped the teacup (Grimsby 2/10 poses)
+- emotion words painted faces on Ember's eye
+- tight framings were ignored (snout and jaw failed 3/3)
+
+Whole-frame generation from references is what these models do well (model sheets, boards and backgrounds all passed). A show's "kit" becomes its reference images, which we already produce. Blender and its headless-GPU risk drop out.
+
+**Trade-off.** Consistency becomes very close but not pixel-identical, and motion can glitch (hands, morphing). QA rerolls cover this, and reaction/hold shots stay low-risk.
+
+**Kept.** Writers' room, shot scripts, voices and Casting Judge, vision judge, job queue, Vast/RunPod dispatcher, cost ledger. The kit-parts code stays in the repo but is unused.
+
+**Kit-parts spend before the switch:** about $1.55, of which vision judging was $0.82.
+
 ## 2026-11-12: The Dragon's Accountant renders as 2D clay cutouts, not 3D
 
 **Decision.** The pilot show uses the "Felt and Clay Hoard" look, produced as **2D cutout puppets**: clay-style art generated as separate flat parts (head, expressions, torso, arms, mouth set, Ember's eye/claw/tail), with backgrounds removed. The parts are layered on bones in Blender and posed on twos for a stop-motion feel.
