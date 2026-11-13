@@ -6,6 +6,7 @@ import { closeDb, db, queue, salad, schema, spentToday, storage } from "@hermes/
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { runGpuDispatcher } from "./gpu.js";
 import { approveDraft, getOrCreateDraft, judgeVoices, pickStyle, pickVoice, reauditionVoice } from "./kit.js";
+import { compilePuppets } from "./kit-parts.js";
 import { enqueueStage, startSketch } from "./orchestrator.js";
 import { SKETCH_STAGES, type SketchStage } from "./pipeline.js";
 import { HANDLERS } from "./stages.js";
@@ -201,6 +202,30 @@ async function main() {
       const character = (a.meta as { character: string }).character;
       await pickVoice(o.show!, character, a.id, a.storageKey);
       console.log(`${character}: voice picked`);
+      break;
+    }
+    case "kit:parts": {
+      const draft = await getOrCreateDraft(o.show!);
+      await queue.enqueue(
+        "kit:plan_parts",
+        { showId: o.show! },
+        { showId: o.show!, idempotencyKey: `${draft.id}:plan_parts:${Date.now()}` },
+      );
+      console.log(
+        "queued Kit Builder. Run: pnpm hermes run --until-idle  (CPU: plan + judging)  and  pnpm hermes gpu --until-idle",
+      );
+      break;
+    }
+    case "kit:compile": {
+      const { puppets, gaps } = await compilePuppets(o.show!);
+      for (const p of puppets) {
+        const parts = Object.entries(p.parts).map(([id, part]) => {
+          const vs = Object.values(part.variants);
+          return `${id}: ${vs.filter((v) => v.passed).length}/${vs.length} variants passed`;
+        });
+        console.log(`${p.character} [${p.archetype}]  ${parts.join("; ")}`);
+      }
+      if (gaps.length) console.log(`\nGAPS (${gaps.length}):\n  ${gaps.join("\n  ")}`);
       break;
     }
     case "cast:reaudition": {

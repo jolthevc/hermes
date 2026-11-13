@@ -1,10 +1,11 @@
 import { hostname } from "node:os";
 import { log, queue } from "@hermes/core";
 import { KIT_HANDLERS } from "./kit.js";
+import { PARTS_HANDLERS } from "./kit-parts.js";
 import { onDead, onSucceeded } from "./orchestrator.js";
 import { HANDLERS as SKETCH_HANDLERS } from "./stages.js";
 
-const HANDLERS = { ...SKETCH_HANDLERS, ...KIT_HANDLERS };
+const HANDLERS = { ...SKETCH_HANDLERS, ...KIT_HANDLERS, ...PARTS_HANDLERS };
 
 const WORKER_ID = `${hostname()}:${process.pid}`;
 

@@ -8,3 +8,4 @@ torchvision
 timm
 einops
 kornia
+numpy

@@ -116,16 +116,11 @@ def _diagnostics(pipe) -> dict[str, Any]:
     }
 
 
-def cutout(ctx: Ctx) -> dict[str, Any]:
-    if MOCK:
-        ctx.write("image", mock.png(rgba=(200, 120, 60, 0)), {"mock": True})
-        return {}
-
+def _matte(img):
+    """Alpha mask (PIL 'L') for the foreground of an RGB image."""
     import torch
-    from PIL import Image
     from torchvision import transforms
 
-    img = Image.open(io.BytesIO(ctx.input_bytes("image"))).convert("RGB")
     tf = transforms.Compose(
         [
             transforms.Resize((1024, 1024)),
@@ -135,10 +130,117 @@ def cutout(ctx: Ctx) -> dict[str, Any]:
     )
     with torch.no_grad():
         pred = _get_matting()(tf(img).unsqueeze(0).to("cuda").half())[-1].sigmoid().cpu()[0].squeeze()
-    mask = transforms.ToPILImage()(pred).resize(img.size)
-    img.putalpha(mask)
+    return transforms.ToPILImage()(pred.float()).resize(img.size)
+
+
+def cutout(ctx: Ctx) -> dict[str, Any]:
+    if MOCK:
+        ctx.write("image", mock.png(rgba=(200, 120, 60, 0)), {"mock": True})
+        return {}
+
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(ctx.input_bytes("image"))).convert("RGB")
+    img.putalpha(_matte(img))
     ctx.write("image", _png(img), {"model": MATTING_MODEL})
     return {}
 
 
-TASKS = {"generate": generate, "cutout": cutout}
+def _gen(prompt: str, refs: list, width: int, height: int, seed: int, steps: int = 4):
+    import torch
+
+    return _get_pipe()(
+        prompt=prompt,
+        image=refs or None,
+        height=height,
+        width=width,
+        num_inference_steps=steps,
+        guidance_scale=1.0,
+        generator=torch.Generator(device="cuda").manual_seed(int(seed)),
+    ).images[0]
+
+
+def _diff_overlay(base, variant, base_alpha, threshold: int = 22, pad: int = 12):
+    """Region where `variant` differs from `base` (an edit of it): returns (RGBA crop, box, change_ratio).
+
+    Edits of the same canvas line up pixel-for-pixel apart from the intended change (face, mouth, eyelid),
+    so the changed region becomes an overlay sprite placed at a known offset over the base puppet.
+    """
+    import numpy as np
+    from PIL import Image, ImageFilter
+
+    a = np.asarray(base.convert("RGB"), dtype=np.int16)
+    b = np.asarray(variant.convert("RGB"), dtype=np.int16)
+    d = np.abs(a - b).mean(axis=2).astype(np.uint8)
+    m = Image.fromarray(d).filter(ImageFilter.GaussianBlur(3)).point(lambda v: 255 if v > threshold else 0)
+    # Open (drop speckle from global drift), then close/dilate to make a solid, slightly padded region.
+    m = m.filter(ImageFilter.MinFilter(5)).filter(ImageFilter.MaxFilter(2 * pad + 1))
+    fg = np.asarray(base_alpha) > 32
+    mask = (np.asarray(m) > 0) & fg
+    fg_area = max(1, int(fg.sum()))
+    ratio = float(mask.sum()) / fg_area
+    if not mask.any():
+        return None, None, 0.0
+    ys, xs = np.where(mask)
+    x0, x1, y0, y1 = int(xs.min()), int(xs.max()) + 1, int(ys.min()), int(ys.max()) + 1
+    alpha = Image.fromarray((mask * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(2))
+    sprite = variant.convert("RGB").copy()
+    sprite.putalpha(alpha)
+    return sprite.crop((x0, y0, x1, y1)), {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}, round(ratio, 4)
+
+
+def variants(ctx: Ctx) -> dict[str, Any]:
+    """Base image + aligned edit variants, all cut out — the raw material for a cutout puppet.
+
+    params: {base: {prompt, refs[], width, height, seed} | None (then input "base" is used),
+             variants: [{name, prompt, mode: "full" | "overlay", seed?}]}
+    outputs: base (RGB), base_rgba, and one RGBA per variant
+      - full:    whole canvas, aligned with base (pose swaps)
+      - overlay: cropped changed region + {x,y,w,h} offset in meta (expressions, mouths, eyelids)
+    """
+    import time
+
+    from PIL import Image
+
+    p = ctx.params
+    vs = p.get("variants", [])
+    if MOCK:
+        ctx.write("base", mock.png(), {"mock": True})
+        ctx.write("base_rgba", mock.png(rgba=(200, 120, 60, 200)), {"mock": True})
+        for v in vs:
+            ctx.write(v["name"], mock.png(16, 16), {"mode": v["mode"], "box": {"x": 0, "y": 0, "w": 16, "h": 16}})
+        return {"variants": len(vs)}
+
+    t0 = time.time()
+    if p.get("base"):
+        b = p["base"]
+        refs = [Image.open(io.BytesIO(ctx.input_bytes(n))).convert("RGB") for n in b.get("refs", [])]
+        base = _gen(b["prompt"], refs, int(b.get("width", 1024)), int(b.get("height", 1536)), int(b.get("seed", 1)))
+    else:
+        base = Image.open(io.BytesIO(ctx.input_bytes("base"))).convert("RGB")
+    base_alpha = _matte(base)
+    base_rgba = base.copy()
+    base_rgba.putalpha(base_alpha)
+    ctx.write("base", _png(base), {"role": "base"})
+    ctx.write("base_rgba", _png(base_rgba), {"role": "base_rgba", "box": {"x": 0, "y": 0, "w": base.width, "h": base.height}})
+
+    report: dict[str, Any] = {}
+    for v in vs:
+        out = _gen(v["prompt"], [base], base.width, base.height, int(v.get("seed", 7)))
+        if v["mode"] == "full":
+            rgba = out.copy()
+            rgba.putalpha(_matte(out))
+            ctx.write(v["name"], _png(rgba), {"mode": "full", "box": {"x": 0, "y": 0, "w": out.width, "h": out.height}})
+            report[v["name"]] = {"mode": "full"}
+        else:
+            sprite, box, ratio = _diff_overlay(base, out, base_alpha)
+            if sprite is None:  # edit changed nothing visible; keep a 1px transparent placeholder, flag it
+                sprite, box = Image.new("RGBA", (1, 1)), {"x": 0, "y": 0, "w": 1, "h": 1}
+            ctx.write(v["name"], _png(sprite), {"mode": "overlay", "box": box, "change_ratio": ratio})
+            # Full edited frame too, so the Part Judge can compare it against the base in context.
+            ctx.write(f"{v['name']}__raw", _png(out), {"mode": "raw"})
+            report[v["name"]] = {"mode": "overlay", "change_ratio": ratio}
+    return {"variants": len(vs), "seconds": round(time.time() - t0, 1), "report": report}
+
+
+TASKS = {"generate": generate, "cutout": cutout, "variants": variants}
