@@ -67,11 +67,14 @@ const localUrl = (pool: string) =>
   `http://localhost:${{ image: 8101, tts: 8102, render: 8103, video: 8104 }[pool]}`;
 
 async function finish(job: Job, t: GpuTask, out: WorkerOutput, startedAt: Date) {
-  if (!out.ok)
+  if (!out.ok) {
+    // "unknown task" = the job landed on a node still running an older image during a rolling update.
+    const skew = /unknown task/.test(out.error ?? "");
     throw new HermesError(
       `GPU ${t.pool}/${t.task} failed: ${out.error}`,
-      out.error_class === "transient" ? "transient" : "fatal",
+      out.error_class === "transient" || skew ? "transient" : "fatal",
     );
+  }
   const ids: Record<string, string> = {};
   for (const o of out.outputs ?? []) {
     const slot = t.outputs[o.name];
@@ -163,9 +166,14 @@ async function pollSalad(): Promise<number> {
     const t = (job.payload as { _task: GpuTask })._task;
     try {
       const sj = await salad.getJob<unknown, WorkerOutput>(t.pool, job.externalId!);
-      if (sj.status === "succeeded")
-        await finish(job, t, sj.output ?? { ok: false, error: "no output" }, job.updatedAt);
-      else if (sj.status === "failed" || sj.status === "cancelled")
+      if (sj.status === "succeeded") {
+        // A worker-reported failure (ok:false) must go through the retry policy, not loop as a poll error.
+        try {
+          await finish(job, t, sj.output ?? { ok: false, error: "no output" }, job.updatedAt);
+        } catch (e) {
+          await failJob(job, e, job.updatedAt);
+        }
+      } else if (sj.status === "failed" || sj.status === "cancelled")
         await failJob(job, new HermesError(`Salad job ${sj.status}`, "transient"), job.updatedAt);
       else await queue.heartbeat(job.id, WORKER_ID, LEASE_S);
     } catch (e) {
