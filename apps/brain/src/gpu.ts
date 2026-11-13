@@ -384,6 +384,9 @@ async function reconcileVast() {
     } else if (inst.status === "busy" && !running.has(inst.id)) {
       // Dispatcher restarted mid-job: the job's lease will expire and it gets retried; free the instance.
       await db.update(gpuInstances).set({ status: "ready", busyJobId: null }).where(eq(gpuInstances.id, inst.id));
+    } else if (inst.status === "ready" && inst.image !== (await workerImage(inst.pool).catch(() => inst.image))) {
+      // A newer worker image was deployed: never send jobs to an outdated instance.
+      await retireInstance(inst, "image outdated");
     } else if (inst.status === "ready") {
       const idle = Date.now() - inst.lastActiveAt.getTime() > IDLE_MS && (await queuedCount(inst.pool)) === 0;
       if (idle) await retireInstance(inst, "idle");
