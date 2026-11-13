@@ -116,8 +116,14 @@ export interface VastInstance {
 }
 
 export async function listInstances(): Promise<VastInstance[]> {
-  const r = await vast<{ instances?: VastInstance[] }>("GET", "/instances/");
-  return r.instances ?? [];
+  // v0 list is deprecated (410); v1 returns the same `instances` array. The account may hold other
+  // projects' instances — callers must only act on labels they own ("hermes-*").
+  const r = await fetch("https://console.vast.ai/api/v1/instances/", {
+    headers: { Authorization: `Bearer ${requireEnv("VAST_API_KEY")}` },
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!r.ok) throw new HermesError(`Vast GET /v1/instances ${r.status}`, r.status >= 500 ? "transient" : "fatal");
+  return ((await r.json()) as { instances?: VastInstance[] }).instances ?? [];
 }
 
 export async function getInstance(id: number): Promise<VastInstance | null> {
