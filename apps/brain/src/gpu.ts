@@ -467,16 +467,35 @@ async function runpodEndpoint(pool: string): Promise<string | null> {
   return (row?.value as Record<string, string> | undefined)?.[pool] ?? null;
 }
 
+// When this dispatcher first saw each queued primary-queue job. The fallback wait is measured from here,
+// so a job that sat in a hold (or through a dispatcher restart) still gets a fair chance on the primary.
+const firstSeen = new Map<number, number>();
+
+async function overdueForFallback(pool: string, waitedSeconds: number): Promise<number[]> {
+  const rows = await db
+    .select({ id: jobs.id })
+    .from(jobs)
+    .where(and(eq(jobs.status, "queued"), eq(jobs.queue, `gpu:${pool}`), sql`run_after <= now()`));
+  const now = Date.now();
+  const due: number[] = [];
+  for (const { id } of rows) {
+    if (!firstSeen.has(id)) firstSeen.set(id, now);
+    if (now - firstSeen.get(id)! >= waitedSeconds * 1000) due.push(id);
+  }
+  return due;
+}
+
 async function dispatchRunpod(pools: Pool[], waitedSeconds: number) {
   let n = 0;
   for (const pool of pools) {
     const endpoint = await runpodEndpoint(pool);
     if (!endpoint) continue;
+    const overdue = await overdueForFallback(pool, waitedSeconds);
     for (;;) {
-      // Jobs explicitly sent to fallback go immediately; primary-queue jobs only after waiting.
+      // Jobs explicitly sent to fallback go immediately; primary-queue jobs only once overdue.
       const job =
         (await queue.claim([`gpu:${pool}:fallback`], WORKER_ID, LEASE_S)) ??
-        (await queue.claim([`gpu:${pool}`], WORKER_ID, LEASE_S, waitedSeconds));
+        (await queue.claim([`gpu:${pool}`], WORKER_ID, LEASE_S, 0, overdue));
       if (!job) break;
       const started = new Date();
       try {

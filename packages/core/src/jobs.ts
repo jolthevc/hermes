@@ -48,7 +48,9 @@ export async function claim(
   workerId: string,
   leaseSeconds = 900,
   waitedSeconds = 0,
+  onlyIds?: number[],
 ): Promise<Job | null> {
+  if (onlyIds && onlyIds.length === 0) return null;
   const rows = await rawSql<Job[]>`
     UPDATE jobs SET status = 'running', attempts = attempts + 1, locked_by = ${workerId},
       locked_until = now() + make_interval(secs => ${leaseSeconds}), updated_at = now()
@@ -56,6 +58,7 @@ export async function claim(
       SELECT id FROM jobs
       WHERE status = 'queued' AND queue = ANY(${queues})
         AND run_after <= now() - make_interval(secs => ${waitedSeconds})
+        ${onlyIds ? rawSql`AND id = ANY(${onlyIds})` : rawSql``}
       ORDER BY priority, run_after, id
       FOR UPDATE SKIP LOCKED LIMIT 1
     )
