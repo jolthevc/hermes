@@ -2,9 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { renderText, ShotScript } from "@hermes/agents";
-import { closeDb, db, queue, salad, schema, spentToday, storage } from "@hermes/core";
+import { closeDb, db, env, queue, runpod, salad, schema, spentToday, storage, vast } from "@hermes/core";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
-import { runGpuDispatcher } from "./gpu.js";
+import { fleetStatus, POOLS, runGpuDispatcher } from "./gpu.js";
 import { approveDraft, getOrCreateDraft, judgeVoices, pickStyle, pickVoice, reauditionVoice } from "./kit.js";
 import { compilePuppets } from "./kit-parts.js";
 import { enqueueStage, startSketch } from "./orchestrator.js";
@@ -12,7 +12,19 @@ import { SKETCH_STAGES, type SketchStage } from "./pipeline.js";
 import { HANDLERS } from "./stages.js";
 import { runLoop } from "./worker.js";
 
-const { shows, showVersions, premises, sketches, shotScripts, jobs, costLedger, ideationBatches, artifacts } = schema;
+const {
+  shows,
+  showVersions,
+  premises,
+  sketches,
+  shotScripts,
+  jobs,
+  costLedger,
+  ideationBatches,
+  artifacts,
+  infraKv,
+  gpuInstances: gpuInstancesT,
+} = schema;
 
 const HELP = `hermes <command> [options]
 
@@ -35,7 +47,10 @@ Writing
 
 Running
   run [--until-idle] [--concurrency 3]            process CPU jobs (agents)
-  gpu [--until-idle]                              dispatch GPU jobs (GPU_BACKEND=salad|local)
+  gpu [--until-idle]                              dispatch GPU jobs (GPU_BACKENDS order, e.g. vast,runpod)
+  gpu:fleet                                       live GPU instances (pool, status, GPU, $/h, uptime)
+  gpu:teardown                                    emergency: destroy every hermes Vast instance
+  infra:gpu --tag T [--image-repo R]              set worker images; create/update RunPod endpoints
   infra:salad --image-repo <registry/user> [--tag T]   create Salad queues + scale-to-zero worker groups
   resume                                          re-enqueue sketches waiting at a stage that now has a handler
   jobs:retry <jobId>                              requeue a dead job
@@ -296,6 +311,76 @@ async function main() {
           `${pool}: ${groups.has(name) ? "updated" : "created"} ${name} -> ${image}, ${gpus.length} GPU classes`,
         );
       }
+      break;
+    }
+    case "infra:gpu": {
+      // Idempotent: records worker images (used for Vast rentals) and creates/updates RunPod endpoints.
+      const repo = o["image-repo"] ?? "docker.io/olearyjames25";
+      const tag = o.tag;
+      if (!tag) throw new Error("--tag is required (the worker image tag to deploy)");
+      const pools = ["image", "tts"] as const;
+      const images = Object.fromEntries(pools.map((p) => [p, `${repo}/hermes-${p}:${tag}`]));
+      await db
+        .insert(infraKv)
+        .values({ key: "worker_images", value: images })
+        .onConflictDoUpdate({ target: infraKv.key, set: { value: images } });
+      console.log("worker images:", images);
+      if (env.RUNPOD_API_KEY) {
+        const templates = await runpod.listTemplates();
+        const endpoints = await runpod.listEndpoints();
+        const ids: Record<string, string> = {};
+        for (const pool of pools) {
+          const name = `hermes-${pool}`;
+          let tpl = templates.find((t) => t.name === name);
+          if (tpl) tpl = await runpod.updateTemplate(tpl.id, { imageName: images[pool]! });
+          else
+            tpl = await runpod.createTemplate({
+              name,
+              imageName: images[pool]!,
+              containerDiskInGb: POOLS[pool].diskGb,
+              env: { HF_HOME: "/models", PORT: "8000" },
+            });
+          let ep = endpoints.find((e) => e.name === name);
+          ep ??= await runpod.createEndpoint({
+            name,
+            templateId: tpl.id,
+            gpuTypeIds: POOLS[pool].runpodGpuTypes,
+            workersMax: 2,
+            idleTimeout: 60,
+            executionTimeoutMs: 30 * 60_000,
+          });
+          ids[pool] = ep.id;
+          console.log(`runpod ${pool}: template ${tpl.id}, endpoint ${ep.id}`);
+        }
+        await db
+          .insert(infraKv)
+          .values({ key: "runpod_endpoints", value: ids })
+          .onConflictDoUpdate({ target: infraKv.key, set: { value: ids } });
+      }
+      break;
+    }
+    case "gpu:fleet": {
+      const rows = await fleetStatus();
+      if (!rows.length) console.log("no live GPU instances");
+      for (const r of rows)
+        console.log(
+          `${r.id.padEnd(16)} ${r.pool.padEnd(6)} ${r.status.padEnd(12)} ${r.gpuName ?? ""} $${(r.dph ?? 0).toFixed(3)}/h  up ${Math.round((Date.now() - r.createdAt.getTime()) / 60000)}m`,
+        );
+      break;
+    }
+    case "gpu:teardown": {
+      // Emergency stop: destroy every Vast instance labelled hermes-* (tracked or not).
+      for (const r of await fleetStatus())
+        if (r.provider === "vast")
+          await db
+            .update(gpuInstancesT)
+            .set({ status: "destroyed", destroyedAt: new Date(), lastError: "teardown" })
+            .where(eq(gpuInstancesT.id, r.id));
+      for (const vi of await vast.listInstances())
+        if (vi.label?.startsWith("hermes-")) {
+          await vast.destroyInstance(vi.id);
+          console.log("destroyed vast instance", vi.id);
+        }
       break;
     }
     case "gpu": {

@@ -39,13 +39,23 @@ export async function enqueue(kind: string, payload: Record<string, unknown>, o:
   return row ?? null; // null = already enqueued under this idempotency key
 }
 
-export async function claim(queues: string[], workerId: string, leaseSeconds = 900): Promise<Job | null> {
+/**
+ * Claim the next due job. `waitedSeconds` only claims jobs that have been due for at least that long:
+ * the GPU dispatcher uses it to hand jobs to a fallback provider when the primary hasn't served them in time.
+ */
+export async function claim(
+  queues: string[],
+  workerId: string,
+  leaseSeconds = 900,
+  waitedSeconds = 0,
+): Promise<Job | null> {
   const rows = await rawSql<Job[]>`
     UPDATE jobs SET status = 'running', attempts = attempts + 1, locked_by = ${workerId},
       locked_until = now() + make_interval(secs => ${leaseSeconds}), updated_at = now()
     WHERE id = (
       SELECT id FROM jobs
-      WHERE status = 'queued' AND queue = ANY(${queues}) AND run_after <= now()
+      WHERE status = 'queued' AND queue = ANY(${queues})
+        AND run_after <= now() - make_interval(secs => ${waitedSeconds})
       ORDER BY priority, run_after, id
       FOR UPDATE SKIP LOCKED LIMIT 1
     )

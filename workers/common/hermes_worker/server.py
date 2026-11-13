@@ -17,7 +17,7 @@ import traceback
 from typing import Any, Callable
 
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -77,8 +77,11 @@ TASKS: dict[str, Handler] = {}
 READY = False
 
 
-@app.on_event("startup")
-def _startup() -> None:
+TOKEN = os.environ.get("HERMES_WORKER_TOKEN", "")
+
+
+def init() -> None:
+    """Load task handlers and warm models. Shared by the HTTP server and the RunPod entrypoint."""
     global TASKS, READY
     TASKS = load_handlers()
     warm = getattr(importlib.import_module(os.environ.get("HERMES_HANDLER_MODULE", "handler")), "warmup", None)
@@ -89,27 +92,36 @@ def _startup() -> None:
     READY = True
 
 
-@app.get("/health")
-def health() -> JSONResponse:
-    # Used as the Salad readiness probe: the job-queue worker waits for this before pulling jobs.
-    return JSONResponse({"ready": READY, "mock": MOCK}, status_code=200 if READY else 503)
-
-
-@app.post("/process")
-def process(job: JobInput) -> JSONResponse:
+def run_job(job: JobInput) -> dict[str, Any]:
+    """Run one job; never raises. ok=false results carry an error_class for the orchestrator's retry policy."""
     handler = TASKS.get(job.task)
     if handler is None:
-        return JSONResponse({"ok": False, "error": f"unknown task {job.task}", "error_class": "fatal"}, status_code=400)
+        return {"ok": False, "error": f"unknown task {job.task}", "error_class": "transient"}
     ctx = Ctx(job)
     started = time.time()
     try:
         metrics = handler(ctx) or {}
     except Exception as e:  # noqa: BLE001 - surfaced to the orchestrator for classification
         log.error("task %s failed: %s", job.task, e)
-        # 200 with ok=false: a deterministic failure should not burn Salad's 4 automatic retries;
-        # the orchestrator applies its own retry policy by error class.
-        return JSONResponse(
-            {"ok": False, "error": str(e)[:2000], "trace": traceback.format_exc()[-4000:], "error_class": "fatal"}
-        )
+        return {"ok": False, "error": str(e)[:2000], "trace": traceback.format_exc()[-4000:], "error_class": "fatal"}
     metrics.setdefault("gpu_seconds", round(time.time() - started, 3))
-    return JSONResponse({"ok": True, "outputs": ctx._written, "metrics": metrics})
+    return {"ok": True, "outputs": ctx._written, "metrics": metrics}
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    init()
+
+
+@app.get("/health")
+def health() -> JSONResponse:
+    # Readiness: the orchestrator only sends jobs once models are loaded.
+    return JSONResponse({"ready": READY, "mock": MOCK}, status_code=200 if READY else 503)
+
+
+@app.post("/process")
+def process(job: JobInput, x_hermes_token: str | None = Header(default=None)) -> JSONResponse:
+    # Rented hosts expose this port publicly; a shared token keeps strangers from running jobs on our GPU.
+    if TOKEN and x_hermes_token != TOKEN:
+        return JSONResponse({"ok": False, "error": "unauthorized", "error_class": "fatal"}, status_code=401)
+    return JSONResponse(run_job(job))

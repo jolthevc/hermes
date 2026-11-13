@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# Starts the worker HTTP app, waits for the port, then (on SaladCloud only) starts Salad's job-queue worker.
+# One image, three ways to run:
+#   RunPod Serverless (RUNPOD_ENDPOINT_ID set): pull jobs from RunPod's queue via the runpod SDK
+#   SaladCloud (SALAD_MACHINE_ID set): HTTP app + Salad's job-queue worker
+#   Anywhere else (Vast.ai instances, local mock): HTTP app on $PORT, jobs POSTed to /process with a token
 set -euo pipefail
 PORT="${PORT:-8000}"
 
+if [[ -n "${RUNPOD_ENDPOINT_ID:-}" ]]; then
+  exec python -m hermes_worker.runpod_entry
+fi
+
 uvicorn hermes_worker.server:app --host 0.0.0.0 --port "$PORT" --workers 1 &
-APP_PID=$!
 
 until (echo > "/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null; do sleep 1; done
 

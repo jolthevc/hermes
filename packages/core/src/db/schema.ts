@@ -340,6 +340,39 @@ export const banditArms = pgTable(
   (t) => [uniqueIndex("bandit_arm_unique").on(t.showId, t.dimension, t.arm)],
 );
 
+// GPU machines the Brain rents (Vast.ai instances). Persisted so a restarted dispatcher re-adopts
+// or destroys them — a paid machine must never be forgotten.
+export const gpuInstances = pgTable(
+  "gpu_instances",
+  {
+    id: text("id").primaryKey(), // "<provider>:<providerId>"
+    provider: text("provider").notNull(), // vast
+    pool: text("pool").notNull(), // image | tts | render | video
+    providerId: text("provider_id").notNull(),
+    status: text("status").notNull(), // provisioning | ready | busy | destroyed | failed
+    url: text("url"),
+    token: text("token").notNull(),
+    image: text("image").notNull(),
+    dph: real("dph"), // USD per hour
+    gpuName: text("gpu_name"),
+    machineId: text("machine_id"),
+    busyJobId: integer("busy_job_id"),
+    lastError: text("last_error"),
+    createdAt: createdAt(),
+    readyAt: timestamp("ready_at", { withTimezone: true }),
+    lastActiveAt: timestamp("last_active_at", { withTimezone: true }).notNull().defaultNow(),
+    destroyedAt: timestamp("destroyed_at", { withTimezone: true }),
+  },
+  (t) => [index("gpu_instances_pool_status").on(t.pool, t.status)],
+);
+
+// Small key/value store for infrastructure state (e.g. RunPod endpoint ids per pool).
+export const infraKv = pgTable("infra_kv", {
+  key: text("key").primaryKey(),
+  value: jsonb("value").notNull(),
+  updatedAt: updatedAt(),
+});
+
 export const incidents = pgTable("incidents", {
   id: uuid("id").primaryKey().defaultRandom(),
   severity: text("severity").notNull(), // info | warn | error | critical

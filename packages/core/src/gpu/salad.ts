@@ -60,7 +60,8 @@ async function saladOnce<T>(method: string, url: string, body?: unknown): Promis
       res.status === 429 || res.status >= 500 ? "transient" : "fatal",
     );
   }
-  return (res.status === 204 ? undefined : await res.json()) as T;
+  const text = await res.text();
+  return (text ? JSON.parse(text) : undefined) as T;
 }
 
 export function submitJob<I>(queue: string, input: I, metadata?: Record<string, unknown>, webhook?: string) {
