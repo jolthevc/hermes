@@ -189,6 +189,52 @@ def _diff_overlay(base, variant, base_alpha, threshold: int = 22, pad: int = 12)
     return sprite.crop((x0, y0, x1, y1)), {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}, round(ratio, 4)
 
 
+def _best_shift(base, edited, box, search: int = 12) -> tuple[int, int]:
+    """Small (dx, dy) that best aligns `edited` to `base` inside `box`: edit models redraw the whole frame and
+    can nudge the head a few pixels, which would show as a seam when the overlay is pasted on the base."""
+    import numpy as np
+
+    x, y, w, h = box["x"], box["y"], box["w"], box["h"]
+    a = np.asarray(base.convert("L"), dtype=np.float32)
+    b = np.asarray(edited.convert("L"), dtype=np.float32)
+    ref = a[y : y + h, x : x + w]
+    best, best_err = (0, 0), float("inf")
+    for dy in range(-search, search + 1, 2):
+        for dx in range(-search, search + 1, 2):
+            ys, xs = y + dy, x + dx
+            if ys < 0 or xs < 0 or ys + h > b.shape[0] or xs + w > b.shape[1]:
+                continue
+            # Compare only the outer ring of the box: that is where seams appear (the interior is meant to change).
+            cand = b[ys : ys + h, xs : xs + w]
+            ring = np.ones_like(ref, dtype=bool)
+            ring[h // 6 : h - h // 6, w // 6 : w - w // 6] = False
+            err = float(np.abs(cand[ring] - ref[ring]).mean())
+            if err < best_err:
+                best, best_err = (dx, dy), err
+    return best
+
+
+def _region_overlay(base, edited, box, feather_frac: float = 0.12):
+    """Overlay sprite = the edited image inside a fixed region (e.g. the head), aligned to the base, with a soft
+    elliptical edge so it blends into the base puppet. Returns (sprite RGBA, composite RGB, shift)."""
+    import numpy as np
+    from PIL import Image, ImageFilter
+
+    x, y, w, h = box["x"], box["y"], box["w"], box["h"]
+    dx, dy = _best_shift(base, edited, box)
+    crop = edited.convert("RGB").crop((x + dx, y + dy, x + dx + w, y + dy + h))
+    # Soft ellipse mask: full inside, fading over feather_frac of the box toward the edges.
+    yy, xx = np.mgrid[0:h, 0:w]
+    d = ((xx - (w - 1) / 2) / (w / 2)) ** 2 + ((yy - (h - 1) / 2) / (h / 2)) ** 2
+    alpha = np.clip((1.0 - d) / max(1e-6, 2 * feather_frac), 0, 1)
+    mask = Image.fromarray((alpha * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(2))
+    sprite = crop.copy()
+    sprite.putalpha(mask)
+    comp = base.convert("RGB").copy()
+    comp.paste(crop, (x, y), mask)
+    return sprite, comp, {"dx": dx, "dy": dy}
+
+
 def variants(ctx: Ctx) -> dict[str, Any]:
     """Base image + aligned edit variants, all cut out — the raw material for a cutout puppet.
 
@@ -224,6 +270,8 @@ def variants(ctx: Ctx) -> dict[str, Any]:
     ctx.write("base", _png(base), {"role": "base"})
     ctx.write("base_rgba", _png(base_rgba), {"role": "base_rgba", "box": {"x": 0, "y": 0, "w": base.width, "h": base.height}})
 
+    # Overlays use a fixed region (from the vision locator, in base pixels) when given; else the pixel-diff fallback.
+    region = p.get("region")
     report: dict[str, Any] = {}
     for v in vs:
         out = _gen(v["prompt"], [base], base.width, base.height, int(v.get("seed", 7)))
@@ -231,14 +279,24 @@ def variants(ctx: Ctx) -> dict[str, Any]:
             rgba = out.copy()
             rgba.putalpha(_matte(out))
             ctx.write(v["name"], _png(rgba), {"mode": "full", "box": {"x": 0, "y": 0, "w": out.width, "h": out.height}})
+            # Uncut frame on its plain background, for the Part Judge (transparent PNGs read as black).
+            if f"{v['name']}__raw" in ctx.job.outputs:
+                ctx.write(f"{v['name']}__raw", _png(out), {"mode": "raw"})
             report[v["name"]] = {"mode": "full"}
+        elif region:
+            sprite, comp, shift = _region_overlay(base, out, region)
+            ctx.write(v["name"], _png(sprite), {"mode": "overlay", "box": region, "shift": shift})
+            # What viewers will actually see: base puppet with this overlay pasted. Judged for seams + the change.
+            if f"{v['name']}__comp" in ctx.job.outputs:
+                ctx.write(f"{v['name']}__comp", _png(comp), {"mode": "comp"})
+            report[v["name"]] = {"mode": "overlay", "shift": shift}
         else:
             sprite, box, ratio = _diff_overlay(base, out, base_alpha)
             if sprite is None:  # edit changed nothing visible; keep a 1px transparent placeholder, flag it
                 sprite, box = Image.new("RGBA", (1, 1)), {"x": 0, "y": 0, "w": 1, "h": 1}
             ctx.write(v["name"], _png(sprite), {"mode": "overlay", "box": box, "change_ratio": ratio})
-            # Full edited frame too, so the Part Judge can compare it against the base in context.
-            ctx.write(f"{v['name']}__raw", _png(out), {"mode": "raw"})
+            if f"{v['name']}__raw" in ctx.job.outputs:
+                ctx.write(f"{v['name']}__raw", _png(out), {"mode": "raw"})
             report[v["name"]] = {"mode": "overlay", "change_ratio": ratio}
     return {"variants": len(vs), "seconds": round(time.time() - t0, 1), "report": report}
 

@@ -19,9 +19,14 @@ export const PartPlan = z.object({
   base_prompt: z
     .string()
     .describe(
-      "Image prompt for the base: one isolated element, centered, plain flat light-grey background, whole element inside the frame with margin, neutral state, no text, plus the show's style",
+      "Image prompt for the base. biped: the whole character isolated on a plain flat light-grey background. giant_parts: a framed close-up plate where the named part fills most of the frame (surrounding anatomy may show), dark cave background. Neutral state, no text, plus the show's style.",
     ),
   canvas: z.enum(["portrait", "square", "landscape"]),
+  overlay_region: z
+    .string()
+    .describe(
+      "The area that this part's overlay variants change, described for a vision model to locate, e.g. 'the eye and its eyelids', 'the nostril and the smoke above it'. Use 'none' if the part has no overlay variants.",
+    ),
   variants: z.array(PartVariant),
 });
 export type PartPlan = z.infer<typeof PartPlan>;
@@ -39,11 +44,10 @@ export type PartsPlan = z.infer<typeof PartsPlan>;
 
 const SYSTEM = `You are the Kit Builder for a 2D cutout-puppet animated comedy (stop-motion clay look, vertical video).
 You plan the image parts each character puppet needs. Rules:
-- Every part has ONE base image: the element isolated on a plain flat light-grey background, centered, fully inside the frame with margin, front or three-quarter view, neutral state.
-- Every variant is an EDIT of that base made by an image-edit model: write it as "Change only <X> to <Y>. Keep the character, framing, pose, lighting, colours and background exactly identical."
-- biped characters: one part "body" (full body, standing neutral, arms relaxed, three-quarter view). Its variants are full-body POSES (mode "full") for the actions this character will plausibly perform, chosen from the core actions and this show's kit actions (6-10 poses, include their signature prop business). Do NOT add expressions or mouth shapes; those are added automatically.
-- giant_parts characters (too large to ever fit in frame): 3-6 parts, one per body part the show frames (e.g. eye, nostril, claw, tail). Each gets overlay variants for its states (e.g. eye: narrow, half_lidded, wide, closed, pupil_dilated; nostril: smoke_puff; claw: tap_raised) and full variants for big movements.
-- Base prompts are literal visual descriptions consistent with the character's design and the style. No text, no other characters, no scenery.`;
+- Every part has ONE base image, and every variant is an EDIT of that base made by an image-edit model: write it as "Change only <X> to <Y>. Keep the character, framing, pose, lighting, colours and background exactly identical."
+- biped characters: one part "body": the whole character standing neutral, arms relaxed, three-quarter view, isolated on a plain flat light-grey background, fully in frame with margin. Its variants are full-body POSES (mode "full") for the actions this character plausibly performs, chosen from the core actions and this show's kit actions (6-10 poses, including signature prop business; keep held props held, e.g. a teacup stays in a hand). Do NOT add expressions or mouth shapes; those are added automatically. overlay_region: "the character's whole head including hair, glasses and any hat or helmet".
+- giant_parts characters (too large to ever fit in frame): 3-5 parts, each a FRAMED CLOSE-UP PLATE as the show will actually frame it (e.g. "eye": one enormous eye filling the frame; "snout": the end of the snout with one nostril; "claw": one huge claw resting on gold coins; "tail": a section of tail sweeping across). Do not try to isolate a part from the head: image models draw the whole head when asked for an isolated jaw or nostril. Dark cave background, consistent lighting. State changes are overlay variants (eye: narrow, half_lidded, wide, closed, pupil_dilated; snout: smoke_puff, flared); big movements are full variants (claw: tap_raised).
+- Base prompts are literal visual descriptions consistent with the character's design and the style. No text, no other characters.`;
 
 export async function planParts(
   o: {
@@ -107,6 +111,46 @@ export function standardFaceVariants(): PartVariant[] {
   return [...expr, ...mouths, { name: "blink", mode: "overlay", prompt: EDIT("the eyes to fully closed (a blink)") }];
 }
 
+// ---------- Region locator (vision) ----------
+export const Region = z.object({
+  found: z.boolean(),
+  x0: z.number().describe("left edge, 0-1000 of image width"),
+  y0: z.number().describe("top edge, 0-1000 of image height"),
+  x1: z.number().describe("right edge, 0-1000 of image width"),
+  y1: z.number().describe("bottom edge, 0-1000 of image height"),
+});
+
+/** Bounding box (in pixels, padded) of a described area in an image; null if not found. */
+export async function locateRegion(
+  o: { imageUrl: string; what: string; width: number; height: number; padFrac?: number },
+  ctx: CostContext,
+) {
+  const r = await generateStructured({
+    role: "video_qa",
+    system: "You locate regions in images precisely. Return a tight bounding box in 0-1000 normalized coordinates.",
+    prompt: `Find ${o.what} in this image. The box must contain all of it, as tightly as possible.`,
+    media: [{ type: "image", url: o.imageUrl }],
+    schema: Region,
+    schemaName: "region",
+    ctx: { ...ctx, stage: "kit:locate" },
+  });
+  const b = r.output;
+  if (!b.found || b.x1 <= b.x0 || b.y1 <= b.y0) return null;
+  const pad = o.padFrac ?? 0.1;
+  const px = (v: number, size: number) => Math.round((v / 1000) * size);
+  let x0 = px(b.x0, o.width);
+  let y0 = px(b.y0, o.height);
+  let x1 = px(b.x1, o.width);
+  let y1 = px(b.y1, o.height);
+  const pw = Math.round((x1 - x0) * pad);
+  const ph = Math.round((y1 - y0) * pad);
+  x0 = Math.max(0, x0 - pw);
+  y0 = Math.max(0, y0 - ph);
+  x1 = Math.min(o.width, x1 + pw);
+  y1 = Math.min(o.height, y1 + ph);
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
 // ---------- Part Judge (vision) ----------
 export const PartScore = z.object({
   on_model: z.number().describe("1-5: same character/design as the reference (proportions, colours, costume, props)"),
@@ -120,17 +164,34 @@ export const PartScore = z.object({
 });
 export type PartScore = z.infer<typeof PartScore>;
 
+export type JudgeKind = "base_biped" | "base_plate" | "pose" | "overlay";
+
+const JUDGE_CONTEXT: Record<JudgeKind, string> = {
+  base_biped:
+    "Image 2 is the BASE puppet. For intended_change_only and change_achieved, score whether it is the whole character, cleanly isolated on a plain background, in a neutral standing pose.",
+  base_plate:
+    "Image 2 is a BASE close-up plate for a character too large to fit in frame. Surrounding anatomy may be visible. For intended_change_only and change_achieved, score whether the named part clearly dominates the frame in a neutral state.",
+  pose: "Image 3 is the EDITED pose on its plain background. The background should stay plain and the same tone. Held props should still be held. Score the edit.",
+  overlay:
+    "Image 3 is the BASE with an edited region pasted back in: this is exactly what viewers will see. Check that the requested change is clearly visible, that nothing else changed, and that there is no visible seam, double edge, misalignment or colour shift around the pasted region.",
+};
+
 export async function judgePart(
-  o: { character: string; request: string; referenceUrl: string; baseUrl: string; variantUrl?: string },
+  o: {
+    character: string;
+    request: string;
+    kind: JudgeKind;
+    referenceUrl: string;
+    baseUrl: string;
+    variantUrl?: string;
+  },
   ctx: CostContext,
 ) {
   const r = await generateStructured({
     role: "video_qa",
     system:
       "You are the model-sheet supervisor on a stop-motion style animated show. You check puppet parts for consistency. Be strict: production will reuse these parts in every episode.",
-    prompt: o.variantUrl
-      ? `CHARACTER: ${o.character}\nREQUESTED EDIT: ${o.request}\n\nImage 1 = character reference. Image 2 = BASE part. Image 3 = EDITED variant. Score the edited variant.`
-      : `CHARACTER: ${o.character}\nPART: ${o.request}\n\nImage 1 = character reference. Image 2 = the generated BASE part. Score the base (for intended_change_only and change_achieved, score whether it is a clean isolated element on a plain background in a neutral state).`,
+    prompt: `CHARACTER: ${o.character}\n${o.variantUrl ? "REQUESTED EDIT" : "PART"}: ${o.request}\n\nImage 1 = character reference. Image 2 = the base. ${JUDGE_CONTEXT[o.kind]}`,
     media: [
       { type: "image", url: o.referenceUrl },
       { type: "image", url: o.baseUrl },

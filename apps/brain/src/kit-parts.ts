@@ -5,12 +5,17 @@ import { GPU_KINDS } from "./gpu.js";
 import { getOrCreateDraft } from "./kit.js";
 import type { StageHandler } from "./stages.js";
 
-// Kit Builder pipeline: plan parts -> generate base + edit variants (GPU) -> Part Judge (vision) ->
-// regenerate failures with new seeds (max MAX_ROUNDS) -> compile the puppet manifest into the draft kit.
+// Kit Builder pipeline, two phases per part:
+//   A "base":     generate the base (+ full-pose edits) -> judge base (and poses on their plain background)
+//   B "overlays": once the base passes, a vision locator marks the region overlays change (the head; Ember's eye)
+//                 -> every expression / mouth / eyelid edit is cut from that region, aligned, feathered, and judged
+//                 as the composite viewers will see.
+// Failures regenerate with new seeds up to MAX_ROUNDS per phase; then compile the puppet manifest.
 
 const { showVersions, artifacts } = schema;
 const MAX_ROUNDS = 3;
 const CANVAS = { portrait: [1024, 1536], square: [1024, 1024], landscape: [1536, 1024] } as const;
+const BIPED_REGION = "the character's whole head including hair, glasses and any hat or helmet";
 
 type Look = {
   brief?: {
@@ -21,6 +26,8 @@ type Look = {
   board?: { artifactId: string; key: string };
   parts_plan?: partAgents.PartsPlan;
 };
+
+type Box = { x: number; y: number; w: number; h: number };
 
 const slug = (s: string) =>
   s
@@ -33,10 +40,12 @@ interface PartsPayload {
   version: number;
   character: string;
   partId: string;
+  phase: "base" | "overlays";
   round: number;
-  only?: string[]; // variant names to (re)generate; undefined = all
-  baseKey?: string; // reuse an approved base instead of generating one
+  only?: string[]; // variant names to (re)generate; undefined = all for the phase
+  baseKey?: string; // approved base to edit from (pose regens, overlays phase)
   baseSeed?: number;
+  region?: Box; // overlays phase: where the overlay edits are cut from
 }
 
 async function version(showId: string, v: number) {
@@ -69,6 +78,12 @@ async function referenceKey(showId: string, character: string, archetype: string
   return look.board!.key;
 }
 
+const idem = (p: PartsPayload) => `${p.showId}:${p.version}:parts:${p.character}:${p.partId}:${p.phase}:r${p.round}`;
+
+function enqueueParts(p: PartsPayload) {
+  return queue.enqueue("kit:parts", { ...p }, { queue: "gpu:image", showId: p.showId, idempotencyKey: idem(p) });
+}
+
 // ---------- CPU: plan ----------
 export const planPartsHandler: StageHandler = async (job) => {
   const { showId } = job.payload as { showId: string };
@@ -88,7 +103,11 @@ export const planPartsHandler: StageHandler = async (job) => {
   );
   for (const c of plan.characters)
     if (c.archetype === "biped")
-      for (const p of c.parts) if (p.part_id === "body") p.variants.push(...partAgents.standardFaceVariants());
+      for (const p of c.parts)
+        if (p.part_id === "body") {
+          p.variants.push(...partAgents.standardFaceVariants());
+          p.overlay_region = BIPED_REGION;
+        }
   await db
     .update(showVersions)
     .set({ look: { ...look, parts_plan: plan } })
@@ -96,22 +115,14 @@ export const planPartsHandler: StageHandler = async (job) => {
   let n = 0;
   for (const c of plan.characters)
     for (const p of c.parts) {
-      const payload: PartsPayload = {
+      await enqueueParts({
         showId,
         version: draft.version,
         character: c.character,
         partId: p.part_id,
+        phase: "base",
         round: 1,
-      };
-      await queue.enqueue(
-        "kit:parts",
-        { ...payload },
-        {
-          queue: "gpu:image",
-          showId,
-          idempotencyKey: `${draft.id}:parts:${c.character}:${p.part_id}:r1`,
-        },
-      );
+      });
       n++;
     }
   return {
@@ -120,7 +131,7 @@ export const planPartsHandler: StageHandler = async (job) => {
   };
 };
 
-// ---------- GPU: base + variants ----------
+// ---------- GPU: one phase of one part ----------
 GPU_KINDS["kit:parts"] = {
   build: async (job) => {
     const p = job.payload as PartsPayload;
@@ -129,12 +140,15 @@ GPU_KINDS["kit:parts"] = {
     const { c, p: part } = findPart(look, p.character, p.partId);
     const style = look.brief!.directions[look.style!]!.style_prompt;
     const [w, h] = CANVAS[part.canvas];
+    const wantMode = p.phase === "base" ? "full" : "overlay";
     const variants = part.variants
-      .filter((x) => !p.only || p.only.includes(x.name))
+      .filter((x) => x.mode === wantMode && (!p.only || p.only.includes(x.name)))
       .map((x, i) => ({ ...x, prompt: `${x.prompt}\n\nStyle: ${style}`, seed: 100 * p.round + i }));
-    const dir = `v${p.version}/parts/${slug(p.character)}/${p.partId}/r${p.round}`;
+    const dir = `v${p.version}/parts/${slug(p.character)}/${p.partId}/${p.phase}-r${p.round}`;
+    const key = (name: string) => storage.showKey(p.showId, `${dir}/${name}.png`);
+    const baseKey = p.baseKey ?? key("base");
     const slot = (name: string, role: string, extra: Record<string, unknown> = {}) => ({
-      key: storage.showKey(p.showId, `${dir}/${name}.png`),
+      key: key(name),
       contentType: "image/png",
       kind: "puppet_part",
       meta: {
@@ -143,12 +157,13 @@ GPU_KINDS["kit:parts"] = {
         part_id: p.partId,
         name,
         role,
+        phase: p.phase,
         round: p.round,
         version: p.version,
+        base_key: baseKey,
         ...extra,
       },
     });
-    const outputs: Record<string, ReturnType<typeof slot>> = {};
     const inputs: Record<string, string> = {};
     let base: Record<string, unknown> | null = null;
     if (p.baseKey) inputs.base = p.baseKey;
@@ -162,49 +177,54 @@ GPU_KINDS["kit:parts"] = {
         seed: p.baseSeed ?? 1,
       };
     }
-    outputs.base = slot("base", "base");
-    outputs.base_rgba = slot("base_rgba", "base_rgba");
+    // The worker always writes base + base_rgba; when reusing an approved base they're just copies.
+    const baseRole = p.baseKey ? "base_copy" : "base";
+    const outputs: Record<string, ReturnType<typeof slot>> = {
+      base: slot("base", baseRole),
+      base_rgba: slot("base_rgba", `${baseRole}_rgba`),
+    };
     for (const x of variants) {
-      outputs[x.name] = slot(x.name, "variant", { mode: x.mode, request: x.prompt.split("\n")[0] });
-      if (x.mode === "overlay") outputs[`${x.name}__raw`] = slot(`${x.name}__raw`, "raw", { variant: x.name });
+      const request = x.prompt.split("\n")[0];
+      outputs[x.name] = slot(x.name, "variant", { mode: x.mode, request });
+      if (x.mode === "full") outputs[`${x.name}__raw`] = slot(`${x.name}__raw`, "raw", { variant: x.name });
+      else outputs[`${x.name}__comp`] = slot(`${x.name}__comp`, "comp", { variant: x.name });
     }
     return {
       pool: "image",
       task: "variants",
       showId: p.showId,
-      params: { base, variants: variants.map(({ name, mode, prompt, seed }) => ({ name, mode, prompt, seed })) },
+      params: {
+        base,
+        region: p.region ?? null,
+        variants: variants.map(({ name, mode, prompt, seed }) => ({ name, mode, prompt, seed })),
+      },
       inputs,
       outputs,
     };
   },
   collect: async (job) => {
     const p = job.payload as PartsPayload;
-    await queue.enqueue(
-      "kit:parts_qa",
-      { ...p },
-      {
-        showId: p.showId,
-        idempotencyKey: `qa:${p.showId}:${p.version}:${p.character}:${p.partId}:r${p.round}`,
-      },
-    );
+    await queue.enqueue("kit:parts_qa", { ...p }, { showId: p.showId, idempotencyKey: `qa:${idem(p)}` });
     return { queued_qa: true };
   },
 };
 
-// ---------- CPU: Part Judge + regeneration ----------
+// ---------- CPU: Part Judge, locator, regeneration ----------
 type PartMeta = {
   character: string;
   part_id: string;
   name: string;
   role: string;
+  phase?: string;
   mode?: string;
   request?: string;
   variant?: string;
   round: number;
   version: number;
+  base_key?: string;
   judge?: partAgents.PartScore;
-  box?: { x: number; y: number; w: number; h: number };
-  change_ratio?: number;
+  box?: Box;
+  region?: Box;
 };
 
 async function partArtifacts(showId: string, version: number, character: string, partId: string) {
@@ -221,98 +241,102 @@ export const partsQaHandler: StageHandler = async (job) => {
   const p = job.payload as PartsPayload;
   const v = await version(p.showId, p.version);
   const look = v.look as Look;
-  const { c } = findPart(look, p.character, p.partId);
-  const all = await partArtifacts(p.showId, p.version, p.character, p.partId);
-  const thisRound = all.filter((a) => a.m.round === p.round);
-  const url = (key: string) => storage.presignGet(key, 6 * 3600);
+  const { c, p: part } = findPart(look, p.character, p.partId);
+  const rows = (await partArtifacts(p.showId, p.version, p.character, p.partId)).filter(
+    (a) => a.m.phase === p.phase && a.m.round === p.round,
+  );
+  const url = (k: string) => storage.presignGet(k, 6 * 3600);
   const referenceUrl = await url(await referenceKey(p.showId, p.character, c.archetype, look));
   const ctx = { showId: p.showId, jobId: job.id, stage: job.kind };
-
-  const save = (id: string, m: PartMeta, judge: partAgents.PartScore) =>
+  const save = (id: string, m: PartMeta, extra: Partial<PartMeta>) =>
     db
       .update(artifacts)
-      .set({ meta: { ...m, judge } })
+      .set({ meta: { ...m, ...extra } })
       .where(eq(artifacts.id, id));
 
-  // Base: judged when generated this round.
-  const baseRow = thisRound.find((a) => a.m.role === "base");
+  // --- base (phase A, when generated this round) ---
+  const baseRow = rows.find((a) => a.m.role === "base");
   const baseKey = p.baseKey ?? baseRow?.storageKey;
   if (!baseKey) throw new HermesError("no base for part", "invalid_input");
-  if (baseRow && !p.baseKey) {
-    const plan = findPart(look, p.character, p.partId).p;
+  let baseApprovedNow = false;
+  if (p.phase === "base" && baseRow) {
     const score = await partAgents.judgePart(
       {
         character: p.character,
-        request: plan.base_prompt.split("\n")[0]!,
+        request: part.base_prompt.split("\n")[0]!,
+        kind: c.archetype === "biped" ? "base_biped" : "base_plate",
         referenceUrl,
         baseUrl: await url(baseRow.storageKey),
       },
       ctx,
     );
-    await save(baseRow.id, baseRow.m, score);
-    if (!score.pass && p.round < MAX_ROUNDS) {
-      // Bad base invalidates every variant: regenerate everything from a new base seed.
-      await queue.enqueue(
-        "kit:parts",
-        { ...p, round: p.round + 1, only: undefined, baseKey: undefined, baseSeed: p.round + 1 },
-        {
-          queue: "gpu:image",
-          showId: p.showId,
-          idempotencyKey: `${p.showId}:${p.version}:parts:${p.character}:${p.partId}:r${p.round + 1}`,
-        },
-      );
-      return { base: "failed", issue: score.issue, regenerating: true };
+    await save(baseRow.id, baseRow.m, { judge: score });
+    if (!score.pass) {
+      // A bad base invalidates its poses: regenerate the whole phase from a new seed.
+      if (p.round < MAX_ROUNDS)
+        await enqueueParts({ ...p, round: p.round + 1, only: undefined, baseKey: undefined, baseSeed: p.round + 1 });
+      log.info({ character: p.character, part: p.partId, round: p.round, issue: score.issue }, "base failed");
+      return { base: "failed", issue: score.issue, regenerating: p.round < MAX_ROUNDS };
     }
+    baseApprovedNow = true;
   }
 
+  // --- variants of this phase ---
   const baseUrl = await url(baseKey);
   const failed: string[] = [];
-  for (const a of thisRound.filter((x) => x.m.role === "variant")) {
-    const raw = thisRound.find((x) => x.m.role === "raw" && x.m.variant === a.m.name);
-    const target = a.m.mode === "overlay" ? raw : a;
+  for (const a of rows.filter((x) => x.m.role === "variant")) {
+    const target = rows.find((x) => (x.m.role === "raw" || x.m.role === "comp") && x.m.variant === a.m.name);
     if (!target) continue;
-    let score = await partAgents.judgePart(
+    const score = await partAgents.judgePart(
       {
         character: p.character,
         request: a.m.request ?? a.m.name,
+        kind: a.m.mode === "full" ? "pose" : "overlay",
         referenceUrl,
         baseUrl,
         variantUrl: await url(target.storageKey),
       },
       ctx,
     );
-    // Overlays that changed most of the figure (global drift) or nothing at all fail regardless of the judge.
-    if (a.m.mode === "overlay" && ((a.m.change_ratio ?? 0) > 0.35 || (a.m.change_ratio ?? 0) < 0.002))
-      score = { ...score, pass: false, issue: `overlay change ratio ${a.m.change_ratio} out of range` };
-    await save(a.id, a.m, score);
+    await save(a.id, a.m, { judge: score });
     if (!score.pass) failed.push(a.m.name);
   }
-  if (failed.length && p.round < MAX_ROUNDS) {
-    await queue.enqueue(
-      "kit:parts",
-      { ...p, round: p.round + 1, only: failed, baseKey },
-      {
-        queue: "gpu:image",
-        showId: p.showId,
-        idempotencyKey: `${p.showId}:${p.version}:parts:${p.character}:${p.partId}:r${p.round + 1}`,
-      },
+  if (failed.length && p.round < MAX_ROUNDS)
+    await enqueueParts({ ...p, round: p.round + 1, only: failed, baseKey, baseSeed: undefined });
+
+  // --- base just approved: locate the overlay region once, start phase B ---
+  let overlaysQueued = false;
+  if (baseApprovedNow && part.variants.some((x) => x.mode === "overlay") && part.overlay_region !== "none") {
+    const [w, h] = CANVAS[part.canvas];
+    const region = await partAgents.locateRegion(
+      { imageUrl: baseUrl, what: part.overlay_region, width: w, height: h },
+      ctx,
     );
+    if (region) {
+      await save(baseRow!.id, { ...baseRow!.m, judge: (baseRow!.m as PartMeta).judge }, { region });
+      await enqueueParts({ ...p, phase: "overlays", round: 1, only: undefined, baseKey, region });
+      overlaysQueued = true;
+    } else log.warn({ character: p.character, part: p.partId, what: part.overlay_region }, "overlay region not found");
   }
-  log.info({ character: p.character, part: p.partId, round: p.round, failed: failed.length }, "parts judged");
-  return { round: p.round, failed, regenerating: failed.length > 0 && p.round < MAX_ROUNDS };
+  log.info(
+    { character: p.character, part: p.partId, phase: p.phase, round: p.round, failed: failed.length, overlaysQueued },
+    "parts judged",
+  );
+  return { phase: p.phase, round: p.round, failed, overlaysQueued };
 };
 
 // ---------- compile ----------
 export interface PuppetVariant {
   key: string;
   mode: "full" | "overlay";
-  box: { x: number; y: number; w: number; h: number };
+  box: Box;
   passed: boolean;
 }
 export interface PuppetPart {
   base: string;
   base_rgba: string;
   canvas: { w: number; h: number };
+  region?: Box;
   variants: Record<string, PuppetVariant>;
 }
 export interface Puppet {
@@ -321,7 +345,8 @@ export interface Puppet {
   parts: Record<string, PuppetPart>;
 }
 
-/** Build the puppet manifest from the best artifacts: latest passing take of each variant (else latest). */
+/** Build the puppet manifest: the latest approved base, and for each variant derived from THAT base,
+ * its latest passing take (else latest take, listed as a gap). */
 export async function compilePuppets(showId: string) {
   const draft = await getOrCreateDraft(showId);
   const look = draft.look as Look;
@@ -331,19 +356,27 @@ export async function compilePuppets(showId: string) {
   for (const c of look.parts_plan.characters) {
     const puppet: Puppet = { character: c.character, archetype: c.archetype, parts: {} };
     for (const part of c.parts) {
-      const rows = await partArtifacts(showId, draft.version, c.character, part.part_id);
+      const rows = (await partArtifacts(showId, draft.version, c.character, part.part_id)).filter((r) => r.m.phase);
       const bases = rows.filter((r) => r.m.role === "base").sort((a, b) => b.m.round - a.m.round);
-      const base = bases.find((b) => b.m.judge?.pass) ?? bases[0];
+      const base = bases.find((b) => b.m.judge?.pass);
       if (!base) {
-        gaps.push(`${c.character}/${part.part_id}: no base`);
+        gaps.push(`${c.character}/${part.part_id}: no approved base (${bases[0]?.m.judge?.issue ?? "not generated"})`);
         continue;
       }
-      const baseRgba = rows.find((r) => r.m.role === "base_rgba" && r.m.round === base.m.round)!;
+      const baseRgba = rows.find(
+        (r) => r.m.role === "base_rgba" && r.storageKey.startsWith(base.storageKey.replace(/base\.png$/, "")),
+      )!;
       const [w, h] = CANVAS[part.canvas];
-      const pp: PuppetPart = { base: base.storageKey, base_rgba: baseRgba.storageKey, canvas: { w, h }, variants: {} };
+      const pp: PuppetPart = {
+        base: base.storageKey,
+        base_rgba: baseRgba?.storageKey ?? base.storageKey,
+        canvas: { w, h },
+        region: base.m.region,
+        variants: {},
+      };
       for (const vdef of part.variants) {
         const takes = rows
-          .filter((r) => r.m.role === "variant" && r.m.name === vdef.name)
+          .filter((r) => r.m.role === "variant" && r.m.name === vdef.name && r.m.base_key === base.storageKey)
           .sort((a, b) => b.m.round - a.m.round);
         const best = takes.find((t) => t.m.judge?.pass) ?? takes[0];
         if (!best) {
