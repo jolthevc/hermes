@@ -1,5 +1,6 @@
 export * as kit from "./kit/index.js";
 export * as parts from "./kit/parts.js";
+export * as director from "./production/director.js";
 export { renderText } from "./render-text.js";
 export * from "./schemas.js";
 export { CORE_VOCAB } from "./vocab.js";

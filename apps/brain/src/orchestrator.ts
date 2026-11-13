@@ -1,6 +1,8 @@
 import { db, type Job, log, queue, schema } from "@hermes/core";
 import { eq } from "drizzle-orm";
+import { GPU_KINDS } from "./gpu-kinds.js";
 import { nextStage, type SketchStage, STAGE_QUEUE } from "./pipeline.js";
+import { PRODUCTION_HANDLERS } from "./production.js";
 import { HANDLERS } from "./stages.js";
 
 const { sketches, shows, premises } = schema;
@@ -28,7 +30,9 @@ export async function startSketch(premiseId: string, opts: { batchTag?: string }
 }
 
 export async function enqueueStage(sketchId: string, showId: string, stage: SketchStage) {
-  if (!HANDLERS[stage] && STAGE_QUEUE[stage] === "cpu") {
+  const built =
+    STAGE_QUEUE[stage] === "cpu" ? Boolean(HANDLERS[stage] ?? PRODUCTION_HANDLERS[stage]) : Boolean(GPU_KINDS[stage]);
+  if (!built) {
     // Not built yet: park the sketch at this stage; `hermes resume` re-enqueues once the handler exists.
     await db.update(sketches).set({ stage, state: "in_progress" }).where(eq(sketches.id, sketchId));
     log.info({ sketchId, stage }, "stage not built yet; sketch waiting");

@@ -124,4 +124,45 @@ def voice_lines(ctx: Ctx) -> dict[str, Any]:
     return {"lines": len(lines)}
 
 
-TASKS = {"voice_design": voice_design, "voice_lines": voice_lines}
+def voice_lines_multi(ctx: Ctx) -> dict[str, Any]:
+    """All lines of a sketch in one job, each in its character's approved voice.
+
+    params: {voices: {voice_id: {ref: <input name>, ref_text}}, lines: [{id, voice, text, language?}]}
+    outputs: line_<id> (WAV); meta {duration_s, words, heard} for timing, lip sync and QA.
+    """
+    p = ctx.params
+    lines = p["lines"]
+    if MOCK:
+        for l in lines:
+            dur = max(0.6, len(l["text"].split()) / 2.6)
+            ctx.write(f"line_{l['id']}", mock.wav(dur), {"duration_s": round(dur, 3), "words": [], "mock": True})
+        return {"lines": len(lines)}
+    import numpy as np
+    import soundfile as sf
+
+    model = _get_base()
+    prompts = {}
+    for vid, v in p["voices"].items():
+        ref, ref_sr = sf.read(io.BytesIO(ctx.input_bytes(v["ref"])))
+        prompts[vid] = model.create_voice_clone_prompt(ref_audio=(np.asarray(ref), ref_sr), ref_text=v["ref_text"])
+    for vid in prompts:
+        mine = [l for l in lines if l["voice"] == vid]
+        if not mine:
+            continue
+        wavs, sr = model.generate_voice_clone(
+            text=[l["text"] for l in mine],
+            language=[l.get("language", "English") for l in mine],
+            voice_clone_prompt=prompts[vid],
+        )
+        for l, samples in zip(mine, wavs):
+            data = _wav(samples, sr)
+            words, heard = _words(data)
+            ctx.write(
+                f"line_{l['id']}",
+                data,
+                {"duration_s": round(len(samples) / sr, 3), "sample_rate": sr, "words": words, "heard": heard},
+            )
+    return {"lines": len(lines), "voices": len(prompts)}
+
+
+TASKS = {"voice_design": voice_design, "voice_lines": voice_lines, "voice_lines_multi": voice_lines_multi}

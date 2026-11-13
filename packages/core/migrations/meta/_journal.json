@@ -15,6 +15,13 @@
       "when": 1794547448268,
       "tag": "0001_elite_mentor",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794556096207,
+      "tag": "0002_fancy_maginty",
+      "breakpoints": true
     }
   ]
 }

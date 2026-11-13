@@ -151,6 +151,17 @@ export const shotScripts = pgTable("shot_scripts", {
   createdAt: createdAt(),
 });
 
+// Director output: the frames-first production plan for a sketch (shots + dialogue lines).
+export const shotLists = pgTable("shot_lists", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  sketchId: uuid("sketch_id")
+    .notNull()
+    .references(() => sketches.id),
+  version: integer("version").notNull().default(1),
+  data: jsonb("data").notNull(),
+  createdAt: createdAt(),
+});
+
 // ---------- durable job queue ----------
 export const jobStatus = pgEnum("job_status", ["queued", "running", "succeeded", "failed", "dead", "cancelled"]);
 

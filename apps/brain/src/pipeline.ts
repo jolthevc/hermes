@@ -1,21 +1,19 @@
-// The sketch pipeline: an ordered list of stages. Each stage is a job; when it succeeds the
-// orchestrator enqueues the next one. Stages without a handler yet are "pending build" — a sketch
-// that reaches one waits there (state stays in_progress, stage = that name) until the handler ships,
-// then `hermes resume` picks it up. Adding a stage = add it here + register a handler.
+// The sketch pipeline (frames-first production; see docs/PLAN.md). Each stage is a job; when it succeeds the
+// orchestrator enqueues the next one. A stage with no handler yet is "pending build": the sketch waits there
+// (state in_progress, stage = that name) until the handler ships, then `hermes resume` picks it up.
 
 export const SKETCH_STAGES = [
   "draft",
   "punchup",
   "shot_script",
   "script_gate", // Gate 1 (judge ensemble)
-  "direct", // Director: blocking, camera, timing
-  "voice", // TTS takes + selection
-  "animatic", // Gate 2: timing check
-  "render", // Blender (GPU)
-  "inserts", // video-model insert shots (GPU)
-  "sound",
-  "edit", // assembly, captions
-  "qa", // Gate 3: technical + video-model review
+  "direct", // Director: beats -> shot list
+  "voice", // TTS per line from approved voices (+ word timings)
+  "animatic", // Gate 2: timings vs shot list
+  "keyframes", // one still per shot from references; vision judge
+  "animate", // talk = audio-driven video, react/hold = near-still, action = first/last-frame i2v
+  "edit", // assembly, captions, sound
+  "qa", // Gate 3: video judge per shot + whole cut
   "review", // Gate 4: autopilot publish or human queue
 ] as const;
 
@@ -26,7 +24,7 @@ export function nextStage(stage: string): SketchStage | null {
   return i >= 0 && i < SKETCH_STAGES.length - 1 ? SKETCH_STAGES[i + 1]! : null;
 }
 
-// Which queue each stage runs on. GPU stages are dispatched to SaladCloud by the GPU dispatcher.
+// Which queue each stage runs on. GPU stages are dispatched by the GPU dispatcher (Vast first, RunPod fallback).
 export const STAGE_QUEUE: Record<SketchStage, string> = {
   draft: "cpu",
   punchup: "cpu",
@@ -35,9 +33,8 @@ export const STAGE_QUEUE: Record<SketchStage, string> = {
   direct: "cpu",
   voice: "gpu:tts",
   animatic: "cpu",
-  render: "gpu:render",
-  inserts: "gpu:video",
-  sound: "cpu",
+  keyframes: "gpu:image",
+  animate: "gpu:video",
   edit: "cpu",
   qa: "cpu",
   review: "cpu",

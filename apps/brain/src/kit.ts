@@ -1,7 +1,7 @@
 import { kit as kitAgents } from "@hermes/agents";
 import { db, HermesError, type Job, queue, schema, storage } from "@hermes/core";
 import { and, desc, eq, isNull } from "drizzle-orm";
-import { GPU_KINDS } from "./gpu.js";
+import { GPU_KINDS } from "./gpu-kinds.js";
 import type { StageHandler } from "./stages.js";
 
 // Show creation (once per show): Art Director → style boards (human picks) → character/expression sheets

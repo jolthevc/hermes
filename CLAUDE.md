@@ -2,7 +2,7 @@
 
 Hermes is an autonomous studio that makes short animated comedy sketches (under 60s, 9:16) for Instagram Reels, TikTok and YouTube Shorts. It runs many "shows" at once. Each show has its own world, cast, art style and voices. A human approves each show once (world, look, cast, voices), then only picks or vetoes finished sketches. Everything else is done by agents.
 
-Read `docs/ARCHITECTURE.md` for the system design and `docs/SPRINT.md` for the current build plan.
+Read `docs/PLAN.md` for the current execution plan (frames-first production), `docs/DECISIONS.md` for why, and `docs/ARCHITECTURE.md` for the original system design (its rendering sections predate the frames-first switch).
 
 ## Non-negotiable rules
 

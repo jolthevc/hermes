@@ -1,7 +1,7 @@
 import { parts as partAgents } from "@hermes/agents";
 import { db, HermesError, type Job, log, queue, schema, storage } from "@hermes/core";
 import { and, eq } from "drizzle-orm";
-import { GPU_KINDS } from "./gpu.js";
+import { GPU_KINDS } from "./gpu-kinds.js";
 import { getOrCreateDraft } from "./kit.js";
 import type { StageHandler } from "./stages.js";
 
