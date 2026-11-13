@@ -106,6 +106,23 @@ export async function judgeVoice(
   return r.output;
 }
 
+/** Casting revises a voice description using the judge's notes on failed takes (keeps the audition line). */
+export async function reviseVoiceInstruct(
+  o: { character: string; instruct: string; judgeNotes: string[] },
+  ctx: CostContext,
+) {
+  const r = await generateStructured({
+    role: "showrunner",
+    system:
+      "You are a casting director rewriting a voice description for a voice-design TTS model whose last takes missed the brief. Keep the character the same; make the description more explicit and concrete where the takes went wrong (state accent, pitch range, pace and affect unambiguously, and say what to avoid). Never name or imitate a real person or existing character.",
+    prompt: `CHARACTER: ${o.character}\nCURRENT DESCRIPTION: ${o.instruct}\n\nJUDGE NOTES ON THE LAST TAKES:\n${o.judgeNotes.map((n) => `- ${n}`).join("\n")}`,
+    schema: z.object({ instruct: z.string(), what_changed: z.string() }),
+    schemaName: "voice_revision",
+    ctx: { ...ctx, stage: "cast:revise" },
+  });
+  return r.output;
+}
+
 export async function voiceBrief(bible: string, ctx: CostContext) {
   const r = await generateStructured({
     role: "showrunner",

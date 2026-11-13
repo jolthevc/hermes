@@ -5,7 +5,7 @@ import { renderText, ShotScript } from "@hermes/agents";
 import { closeDb, db, queue, salad, schema, spentToday, storage } from "@hermes/core";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { runGpuDispatcher } from "./gpu.js";
-import { approveDraft, getOrCreateDraft, judgeVoices, pickStyle, pickVoice } from "./kit.js";
+import { approveDraft, getOrCreateDraft, judgeVoices, pickStyle, pickVoice, reauditionVoice } from "./kit.js";
 import { enqueueStage, startSketch } from "./orchestrator.js";
 import { SKETCH_STAGES, type SketchStage } from "./pipeline.js";
 import { HANDLERS } from "./stages.js";
@@ -68,6 +68,8 @@ const { values: o, positionals } = parseArgs({
     take: { type: "string" },
     "image-repo": { type: "string" },
     apply: { type: "boolean" },
+    character: { type: "string" },
+    n: { type: "string" },
     tag: { type: "string" },
   },
 });
@@ -199,6 +201,11 @@ async function main() {
       const character = (a.meta as { character: string }).character;
       await pickVoice(o.show!, character, a.id, a.storageKey);
       console.log(`${character}: voice picked`);
+      break;
+    }
+    case "cast:reaudition": {
+      const r = await reauditionVoice(o.show!, o.character!, Number(o.n ?? 6));
+      console.log(`round ${r.round} queued.\nchanged: ${r.what_changed}\nnew description: ${r.instruct}`);
       break;
     }
     case "cast:judge": {

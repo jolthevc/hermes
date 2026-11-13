@@ -139,22 +139,45 @@ export async function judgeVoices(showId: string, apply: boolean) {
     .select()
     .from(schema.artifacts)
     .where(and(eq(schema.artifacts.showId, showId), eq(schema.artifacts.kind, "voice_audition")));
-  const results: { character: string; take: number; id: string; key: string; score: kitAgents.VoiceScore }[] = [];
+  const results: {
+    character: string;
+    take: number;
+    round: number;
+    id: string;
+    key: string;
+    score: kitAgents.VoiceScore;
+  }[] = [];
   for (const t of takes) {
-    const m = t.meta as { character: string; take: number; version: number };
+    const m = t.meta as {
+      character: string;
+      take: number;
+      version: number;
+      round?: number;
+      instruct?: string;
+      judge?: kitAgents.VoiceScore;
+    };
     if (m.version !== draft.version) continue;
     const b = brief.voices.find((v) => v.character === m.character);
     if (!b) continue;
-    const wav = await storage.getBytes(t.storageKey);
-    const score = await kitAgents.judgeVoice(
-      { character: m.character, instruct: b.instruct, line: b.audition_line, wavBase64: wav.toString("base64") },
-      { showId, stage: "cast:judge" },
-    );
-    await db
-      .update(schema.artifacts)
-      .set({ meta: { ...m, judge: score } })
-      .where(eq(schema.artifacts.id, t.id));
-    results.push({ character: m.character, take: m.take, id: t.id, key: t.storageKey, score });
+    let score = m.judge;
+    if (!score) {
+      // Judge each take against the description it was generated from (earlier rounds used older briefs).
+      const wav = await storage.getBytes(t.storageKey);
+      score = await kitAgents.judgeVoice(
+        {
+          character: m.character,
+          instruct: m.instruct ?? b.instruct,
+          line: b.audition_line,
+          wavBase64: wav.toString("base64"),
+        },
+        { showId, stage: "cast:judge" },
+      );
+      await db
+        .update(schema.artifacts)
+        .set({ meta: { ...m, judge: score } })
+        .where(eq(schema.artifacts.id, t.id));
+    }
+    results.push({ character: m.character, take: m.take, round: m.round ?? 1, id: t.id, key: t.storageKey, score });
   }
   const best: Record<string, (typeof results)[number]> = {};
   for (const r of results) {
@@ -164,6 +187,35 @@ export async function judgeVoices(showId: string, apply: boolean) {
   }
   if (apply) for (const b of Object.values(best)) await pickVoice(showId, b.character, b.id, b.key);
   return { results, best };
+}
+
+/** Casting rewrites a character's voice description from the judge's notes, then auditions a new round. */
+export async function reauditionVoice(showId: string, character: string, n: number) {
+  const draft = await getOrCreateDraft(showId);
+  const voices = draft.voices as Voices;
+  const entry = voices.brief?.voices.find((v) => v.character === character);
+  if (!entry) throw new Error(`no voice brief for ${character}`);
+  const takes = await db
+    .select()
+    .from(schema.artifacts)
+    .where(and(eq(schema.artifacts.showId, showId), eq(schema.artifacts.kind, "voice_audition")));
+  const mine = takes
+    .map((t) => t.meta as { character: string; version: number; round?: number; judge?: kitAgents.VoiceScore })
+    .filter((m) => m.character === character && m.version === draft.version);
+  const notes = mine.flatMap((m) => (m.judge ? [m.judge.notes] : []));
+  const round = Math.max(1, ...mine.map((m) => m.round ?? 1)) + 1;
+  const revised = await kitAgents.reviseVoiceInstruct(
+    { character, instruct: entry.instruct, judgeNotes: notes },
+    { showId, stage: "cast:revise" },
+  );
+  entry.instruct = revised.instruct;
+  await patchDraft(draft.id, { voices });
+  await queue.enqueue(
+    "cast:auditions",
+    { showId, version: draft.version, character, round, n },
+    { queue: "gpu:tts", showId, idempotencyKey: `${draft.id}:audition:${character}:r${round}` },
+  );
+  return { round, ...revised };
 }
 
 // ---------- GPU kinds ----------
@@ -260,9 +312,12 @@ GPU_KINDS["kit:sheets"] = {
 GPU_KINDS["cast:auditions"] = {
   build: async (job) => {
     const v = await draftFor(job);
-    const { showId, character } = payloadOf(job) as { showId: string; character: string };
+    const p = payloadOf(job) as { showId: string; character: string; round?: number; n?: number };
+    const { showId, character } = p;
+    const round = p.round ?? 1;
     const brief = (v.voices as Voices).brief!.voices.find((x) => x.character === character)!;
-    const n = 3;
+    const n = p.n ?? 3;
+    const prefix = round === 1 ? "" : `r${round}-`;
     return {
       pool: "tts",
       task: "voice_design",
@@ -273,10 +328,10 @@ GPU_KINDS["cast:auditions"] = {
         Array.from({ length: n }, (_, i) => [
           `audio_${i}`,
           {
-            key: storage.showKey(showId, `v${v.version}/voices/${slug(character)}-take${i + 1}.wav`),
+            key: storage.showKey(showId, `v${v.version}/voices/${slug(character)}-${prefix}take${i + 1}.wav`),
             contentType: "audio/wav",
             kind: "voice_audition",
-            meta: { character, take: i + 1, version: v.version },
+            meta: { character, take: i + 1, round, instruct: brief.instruct, version: v.version },
           },
         ]),
       ),
