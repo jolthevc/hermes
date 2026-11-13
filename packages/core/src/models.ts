@@ -25,6 +25,7 @@ export const DEFAULT_MODELS = {
   director: { model: "anthropic/claude-sonnet-5.5", fallbacks: ["anthropic/claude-opus-5.5"], effort: "medium" },
   sound_designer: { model: "anthropic/claude-haiku-5.5", fallbacks: ["anthropic/claude-sonnet-5.5"], effort: "low" },
   editor: { model: "anthropic/claude-sonnet-5.5", fallbacks: ["anthropic/claude-opus-5.5"], effort: "medium" },
+  casting_judge: { model: "google/gemini-3.8-flash", fallbacks: ["google/gemini-4-hydrogen"], effort: "medium" },
   video_qa: { model: "google/gemini-3.8-flash", fallbacks: [], effort: "medium" },
   publisher: { model: "anthropic/claude-haiku-5.5", fallbacks: ["anthropic/claude-sonnet-5.5"], effort: "low" },
   analyst: { model: "anthropic/claude-sonnet-5.5", fallbacks: ["anthropic/claude-opus-5.5"], effort: "medium" },

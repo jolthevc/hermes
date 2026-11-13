@@ -16,6 +16,20 @@ export interface CallOptions {
   effort?: Effort;
   maxTokens?: number;
   showDailyBudgetUsd?: number;
+  /** Optional media attached to the user turn (audio/images), for multimodal judges. */
+  media?: ({ type: "audio"; base64: string; format: "wav" | "mp3" } | { type: "image"; url: string })[];
+}
+
+function userContent(opts: CallOptions) {
+  if (!opts.media?.length) return opts.prompt;
+  return [
+    { type: "text", text: opts.prompt },
+    ...opts.media.map((m) =>
+      m.type === "audio"
+        ? { type: "input_audio", input_audio: { data: m.base64, format: m.format } }
+        : { type: "image_url", image_url: { url: m.url } },
+    ),
+  ];
 }
 
 export interface CallResult<T = string> {
@@ -56,7 +70,7 @@ async function callOnce(model: string, opts: CallOptions, responseFormat?: unkno
         model,
         messages: [
           { role: "system", content: opts.system },
-          { role: "user", content: opts.prompt },
+          { role: "user", content: userContent(opts) },
         ],
         usage: { include: true },
         ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),

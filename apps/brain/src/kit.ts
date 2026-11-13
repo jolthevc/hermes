@@ -130,6 +130,42 @@ export async function pickVoice(showId: string, character: string, artifactId: s
   });
 }
 
+/** Casting Judge: score every audition against its brief; optionally pick the best take per character. */
+export async function judgeVoices(showId: string, apply: boolean) {
+  const draft = await getOrCreateDraft(showId);
+  const brief = (draft.voices as Voices).brief;
+  if (!brief) throw new Error("no voice brief yet");
+  const takes = await db
+    .select()
+    .from(schema.artifacts)
+    .where(and(eq(schema.artifacts.showId, showId), eq(schema.artifacts.kind, "voice_audition")));
+  const results: { character: string; take: number; id: string; key: string; score: kitAgents.VoiceScore }[] = [];
+  for (const t of takes) {
+    const m = t.meta as { character: string; take: number; version: number };
+    if (m.version !== draft.version) continue;
+    const b = brief.voices.find((v) => v.character === m.character);
+    if (!b) continue;
+    const wav = await storage.getBytes(t.storageKey);
+    const score = await kitAgents.judgeVoice(
+      { character: m.character, instruct: b.instruct, line: b.audition_line, wavBase64: wav.toString("base64") },
+      { showId, stage: "cast:judge" },
+    );
+    await db
+      .update(schema.artifacts)
+      .set({ meta: { ...m, judge: score } })
+      .where(eq(schema.artifacts.id, t.id));
+    results.push({ character: m.character, take: m.take, id: t.id, key: t.storageKey, score });
+  }
+  const best: Record<string, (typeof results)[number]> = {};
+  for (const r of results) {
+    const cur = best[r.character];
+    const sum = (s: kitAgents.VoiceScore) => s.overall * 2 + s.matches_brief + s.comic_delivery + s.artifacts;
+    if (!cur || sum(r.score) > sum(cur.score)) best[r.character] = r;
+  }
+  if (apply) for (const b of Object.values(best)) await pickVoice(showId, b.character, b.id, b.key);
+  return { results, best };
+}
+
 // ---------- GPU kinds ----------
 async function draftFor(job: Job) {
   const { showId, version } = payloadOf(job) as { showId: string; version: number };

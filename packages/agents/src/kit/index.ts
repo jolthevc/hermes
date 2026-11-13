@@ -75,6 +75,37 @@ export const VoiceBrief = z.object({
 });
 export type VoiceBrief = z.infer<typeof VoiceBrief>;
 
+// ---------- Casting Judge (listens to audio) ----------
+export const VoiceScore = z.object({
+  matches_brief: z.number().describe("1-5: does it sound like the described voice (age, pitch, timbre, pace, accent)"),
+  clarity: z.number().describe("1-5: every word intelligible, no slurring or mispronunciation"),
+  comic_delivery: z.number().describe("1-5: timing and attitude serve the comedy described in the brief"),
+  artifacts: z
+    .number()
+    .describe("1-5: 5 = clean; lower for glitches, robotic tone, clipping, odd breaths, wrong words"),
+  distinctiveness: z.number().describe("1-5: memorable, would be recognizable as this character"),
+  overall: z.number().describe("1-5"),
+  notes: z.string().describe("One or two sentences: what works, what doesn't"),
+});
+export type VoiceScore = z.infer<typeof VoiceScore>;
+
+export async function judgeVoice(
+  o: { character: string; instruct: string; line: string; wavBase64: string },
+  ctx: CostContext,
+) {
+  const r = await generateStructured({
+    role: "casting_judge",
+    system:
+      "You are a casting director auditioning voices for an animated deadpan comedy. Listen carefully and score strictly. A take that is clear but generic should not score above 3 overall.",
+    prompt: `CHARACTER: ${o.character}\nVOICE BRIEF: ${o.instruct}\nSCRIPTED LINE: "${o.line}"\n\nListen to the attached audition and score it.`,
+    media: [{ type: "audio", base64: o.wavBase64, format: "wav" }],
+    schema: VoiceScore,
+    schemaName: "voice_score",
+    ctx: { ...ctx, stage: "cast:judge" },
+  });
+  return r.output;
+}
+
 export async function voiceBrief(bible: string, ctx: CostContext) {
   const r = await generateStructured({
     role: "showrunner",

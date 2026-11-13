@@ -5,7 +5,7 @@ import { renderText, ShotScript } from "@hermes/agents";
 import { closeDb, db, queue, salad, schema, spentToday, storage } from "@hermes/core";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { runGpuDispatcher } from "./gpu.js";
-import { approveDraft, getOrCreateDraft, pickStyle, pickVoice } from "./kit.js";
+import { approveDraft, getOrCreateDraft, judgeVoices, pickStyle, pickVoice } from "./kit.js";
 import { enqueueStage, startSketch } from "./orchestrator.js";
 import { SKETCH_STAGES, type SketchStage } from "./pipeline.js";
 import { HANDLERS } from "./stages.js";
@@ -67,6 +67,7 @@ const { values: o, positionals } = parseArgs({
     board: { type: "string" },
     take: { type: "string" },
     "image-repo": { type: "string" },
+    apply: { type: "boolean" },
     tag: { type: "string" },
   },
 });
@@ -198,6 +199,21 @@ async function main() {
       const character = (a.meta as { character: string }).character;
       await pickVoice(o.show!, character, a.id, a.storageKey);
       console.log(`${character}: voice picked`);
+      break;
+    }
+    case "cast:judge": {
+      const { results, best } = await judgeVoices(o.show!, Boolean(o.apply));
+      for (const r of results.sort((a, b) => a.character.localeCompare(b.character) || a.take - b.take))
+        console.log(
+          `${r.character.padEnd(14)} take ${r.take}  overall ${r.score.overall}  brief ${r.score.matches_brief}  clarity ${r.score.clarity}  delivery ${r.score.comic_delivery}  clean ${r.score.artifacts}  — ${r.score.notes}`,
+        );
+      console.log(
+        "\nBEST:",
+        Object.values(best)
+          .map((b) => `${b.character} take ${b.take}`)
+          .join(", "),
+        o.apply ? "(picked)" : "(use --apply to pick)",
+      );
       break;
     }
     case "show:approve": {
