@@ -260,6 +260,7 @@ export const partsQaHandler: StageHandler = async (job) => {
   const baseKey = p.baseKey ?? baseRow?.storageKey;
   if (!baseKey) throw new HermesError("no base for part", "invalid_input");
   let baseApprovedNow = false;
+  let baseScore: partAgents.PartScore | undefined;
   if (p.phase === "base" && baseRow) {
     const score = await partAgents.judgePart(
       {
@@ -272,6 +273,7 @@ export const partsQaHandler: StageHandler = async (job) => {
       ctx,
     );
     await save(baseRow.id, baseRow.m, { judge: score });
+    baseScore = score;
     if (!score.pass) {
       // A bad base invalidates its poses: regenerate the whole phase from a new seed.
       if (p.round < MAX_ROUNDS)
@@ -314,7 +316,8 @@ export const partsQaHandler: StageHandler = async (job) => {
       ctx,
     );
     if (region) {
-      await save(baseRow!.id, { ...baseRow!.m, judge: (baseRow!.m as PartMeta).judge }, { region });
+      // Keep the base's approval when recording its region (the stale in-memory meta has no judge yet).
+      await save(baseRow!.id, baseRow!.m, { judge: baseScore, region });
       await enqueueParts({ ...p, phase: "overlays", round: 1, only: undefined, baseKey, region });
       overlaysQueued = true;
     } else log.warn({ character: p.character, part: p.partId, what: part.overlay_region }, "overlay region not found");
