@@ -255,7 +255,8 @@ export const partsQaHandler: StageHandler = async (job) => {
       .where(eq(artifacts.id, id));
 
   // --- base (phase A, when generated this round) ---
-  const baseRow = rows.find((a) => a.m.role === "base");
+  // A base is only "new" when this job generated it (no baseKey given) and it is its own lineage root.
+  const baseRow = p.baseKey ? undefined : rows.find((a) => a.m.role === "base" && a.m.base_key === a.storageKey);
   const baseKey = p.baseKey ?? baseRow?.storageKey;
   if (!baseKey) throw new HermesError("no base for part", "invalid_input");
   let baseApprovedNow = false;
@@ -357,7 +358,10 @@ export async function compilePuppets(showId: string) {
     const puppet: Puppet = { character: c.character, archetype: c.archetype, parts: {} };
     for (const part of c.parts) {
       const rows = (await partArtifacts(showId, draft.version, c.character, part.part_id)).filter((r) => r.m.phase);
-      const bases = rows.filter((r) => r.m.role === "base").sort((a, b) => b.m.round - a.m.round);
+      // Only original bases (base_key == own key); re-uploaded copies from retries are not new bases.
+      const bases = rows
+        .filter((r) => r.m.role === "base" && r.m.base_key === r.storageKey)
+        .sort((a, b) => b.m.round - a.m.round);
       const base = bases.find((b) => b.m.judge?.pass);
       if (!base) {
         gaps.push(`${c.character}/${part.part_id}: no approved base (${bases[0]?.m.judge?.issue ?? "not generated"})`);

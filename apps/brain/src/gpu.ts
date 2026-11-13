@@ -139,7 +139,8 @@ async function finish(
         sha256: o.sha256,
         showId: t.showId,
         sketchId: t.sketchId,
-        meta: { ...slot.meta, ...o.meta, task: t.task, jobId: job.id, provider: cost.provider },
+        // Worker meta (box, shift, seconds...) first; the dispatcher's slot meta (role, lineage) always wins.
+        meta: { ...o.meta, ...slot.meta, task: t.task, jobId: job.id, provider: cost.provider },
       })
       .returning({ id: artifacts.id });
     ids[o.name] = row!.id;
